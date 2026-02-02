@@ -9,7 +9,8 @@ from langchain_core.documents import Document
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 #from langchain.retrievers import EnsembleRetriever
-from langchain_community.retrievers import BM25Retriever,EnsembleRetriever
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_community.retrievers import BM25Retriever
 
 class VectorStoreAbstract():
     def __init__(self, abstracts: List = None, persist_directory: str = "", recreate_index: bool = True):
@@ -178,7 +179,6 @@ class VectorStoreAbstract():
         # Store documents for later use
         self._cached_documents = all_chunked_documents
 
-
     def semantic_search(self,
             query: str,
             k: int = 5,
@@ -217,9 +217,6 @@ class VectorStoreAbstract():
                 results.append(result)
             
             return results
-
-
-
 
     def _ensure_hybrid_retriever(self):
         """Ensure hybrid retriever is initialized, creating it if necessary."""

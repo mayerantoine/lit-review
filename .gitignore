@@ -9,6 +9,8 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+/uploads
+/api/uploads
 
 # testing
 /coverage
@@ -20,6 +22,8 @@
 # production
 /build
 
+/api/chroma_db
+/chroma_db
 # misc
 .DS_Store
 *.pem

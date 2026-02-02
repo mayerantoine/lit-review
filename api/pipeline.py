@@ -10,14 +10,14 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Annotated
+from typing import List, Dict, Any, Optional, Tuple, Annotated, Union
 
+from fastapi.responses import StreamingResponse
 import pandas as pd
 import numpy as np
 from pydantic import BaseModel, Field
 import openai
 from agents import Agent, Runner
-from dotenv import load_dotenv
 
 from vectorstore import VectorStoreAbstract
 
@@ -502,13 +502,21 @@ def select_top_papers(
 def generate_related_work_text(
     query: str,
     top_k_abstracts: pd.DataFrame,
-    generation_model: str
-) -> Tuple[str, GenerationMetadata]:
+    generation_model: str,
+    stream: bool = True
+) -> Union[Tuple[str, GenerationMetadata], 'StreamingResponse']:
     """
     Generate related work section.
 
+    Args:
+        query: Research query/abstract
+        top_k_abstracts: Top-k most relevant papers
+        generation_model: OpenAI model to use
+        stream: If True, returns StreamingResponse. If False, returns (text, metadata) tuple
+
     Returns:
-        Tuple of (generated text, GenerationMetadata)
+        If stream=False: Tuple of (generated text, GenerationMetadata)
+        If stream=True: StreamingResponse with SSE events
     """
     INSTRUCTIONS_RELATED_WORK = """
     You are an expert research assistant who is helping with literature review for a research idea or abstract.
@@ -538,27 +546,82 @@ def generate_related_work_text(
 
         # Generate
         openai_client = openai.OpenAI()
-        response = openai_client.responses.create(
-            model=generation_model,
-            instructions=INSTRUCTIONS_RELATED_WORK,
-            input=input_related_work
-        )
+        prompt = [
+            {"role": "system", "content": INSTRUCTIONS_RELATED_WORK},
+            {"role": "user", "content": input_related_work},
+        ]
 
-        generated_text = response.output_text
+        if stream:
+            # Streaming mode
+            response = openai_client.chat.completions.create(
+                model=generation_model,
+                messages=prompt,
+                stream=True
+            )
 
-        # Extract citation information
-        citations = re.findall(r'\[(\d+)\]', generated_text)
-        unique_citations = sorted(set(int(c) for c in citations))
+            def event_stream():
+                """Generator that yields SSE-formatted events and accumulates text for metadata."""
+                accumulated_text = []
 
-        metadata = GenerationMetadata(
-            length_chars=len(generated_text),
-            length_words=len(generated_text.split()),
-            total_citations=len(citations),
-            unique_citations=len(unique_citations),
-            cited_paper_ids=unique_citations
-        )
+                try:
+                    for chunk in response:
+                        if chunk.choices[0].delta.content:
+                            text = chunk.choices[0].delta.content
+                            accumulated_text.append(text)
+                            # Send the text chunk as SSE event
+                            # Escape newlines in the data to maintain SSE format
+                            yield f"data: {text}\n\n"
 
-        return generated_text, metadata
+                    # Calculate metadata from accumulated text
+                    full_text = ''.join(accumulated_text)
+                    citations = re.findall(r'\[(\d+)\]', full_text)
+                    unique_citations = sorted(set(int(c) for c in citations))
+
+                    # Send metadata as final event (optional)
+                    metadata_dict = {
+                        "type": "metadata",
+                        "length_chars": len(full_text),
+                        "length_words": len(full_text.split()),
+                        "total_citations": len(citations),
+                        "unique_citations": len(unique_citations),
+                        "cited_paper_ids": unique_citations
+                    }
+
+                    import json
+                    yield f"data: [METADATA]{json.dumps(metadata_dict)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                except Exception as e:
+                    # Send error event
+                    import json
+                    error_data = {"type": "error", "message": str(e)}
+                    yield f"data: [ERROR]{json.dumps(error_data)}\n\n"
+
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+        else:
+            # Non-streaming mode (backward compatibility)
+            response = openai_client.chat.completions.create(
+                model=generation_model,
+                messages=prompt,
+                stream=False
+            )
+
+            generated_text = response.choices[0].message.content
+
+            # Extract citation information
+            citations = re.findall(r'\[(\d+)\]', generated_text)
+            unique_citations = sorted(set(int(c) for c in citations))
+
+            metadata = GenerationMetadata(
+                length_chars=len(generated_text),
+                length_words=len(generated_text.split()),
+                total_citations=len(citations),
+                unique_citations=len(unique_citations),
+                cited_paper_ids=unique_citations
+            )
+
+            return generated_text, metadata
 
     except Exception as e:
         raise ProcessingError(f"Failed to generate related work: {str(e)}")
@@ -628,8 +691,6 @@ class LiteratureReviewPipeline:
         self.vector_store = None
         self.all_abstracts = None
 
-        # Load environment
-        load_dotenv(override=True)
 
     def build_index(self, csv_path: str) -> IndexResult:
         """
@@ -784,7 +845,8 @@ class LiteratureReviewPipeline:
         generated_text, generation_metadata = generate_related_work_text(
             query,
             top_k_abstracts,
-            self.config.generation_model
+            self.config.generation_model,
+            stream=False
         )
 
         # Return complete result
@@ -798,6 +860,89 @@ class LiteratureReviewPipeline:
             all_abstracts=self.all_abstracts,
             config=self.config
         )
+
+    def generate_review_stream(self, query: str) -> StreamingResponse:
+        """
+        Generate a literature review with streaming response.
+
+        This method performs Steps 4-7 of the pipeline:
+        4. Retrieve relevant papers using hybrid search
+        5. Score papers for relevance
+        6. Select top-k papers
+        7. Generate related work text (streaming)
+
+        Requires that build_index() has been called first, or that the
+        vector store already exists at the configured persist_directory.
+
+        Args:
+            query: Research query/abstract
+
+        Returns:
+            StreamingResponse with SSE events
+
+        Raises:
+            ProcessingError: If vector store not initialized or generation fails
+        """
+        # Ensure vector store is initialized
+        if self.vector_store is None:
+            # Try to load existing index
+            try:
+                samples_abstracts = []  # Empty list since we're loading existing
+                self.vector_store, _ = initialize_vector_store(
+                    samples_abstracts,
+                    self.config.persist_directory,
+                    recreate_index=False  # Never recreate when generating
+                )
+
+                if not self.vector_store.index_exists:
+                    raise ProcessingError(
+                        f"No index found at {self.config.persist_directory}. "
+                        "Please run build_index() first or use the 'index' command."
+                    )
+            except Exception as e:
+                raise ProcessingError(
+                    f"Failed to load vector store: {str(e)}. "
+                    "Please run build_index() first or use the 'index' command."
+                )
+
+        # Load abstracts if not already loaded
+        if self.all_abstracts is None:
+            raise ProcessingError(
+                "Abstracts not loaded. Please run load_abstracts_only() or build_index() first with the CSV path."
+            )
+
+        # Step 4: Retrieve relevant papers
+        retrieved_abstracts, retrieval_stats = retrieve_relevant_papers(
+            self.vector_store,
+            self.all_abstracts,
+            query,
+            self.config.hybrid_k
+        )
+
+        # Step 5: Score papers for relevance
+        relevance_results, scoring_stats = score_papers_relevance(
+            retrieved_abstracts,
+            query,
+            self.config.relevance_model,
+            self.config.num_abstracts_to_score
+        )
+
+        # Step 6: Select top-k papers
+        top_k_abstracts = select_top_papers(
+            relevance_results,
+            retrieved_abstracts,
+            self.config.top_k
+        )
+
+        # Step 7: Generate related work text (streaming mode)
+        streaming_response = generate_related_work_text(
+            query,
+            top_k_abstracts,
+            self.config.generation_model,
+            stream=True
+        )
+
+        return streaming_response
 
     def run(self, csv_path: str, query: str) -> PipelineResult:
         """
