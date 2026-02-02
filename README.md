@@ -47,6 +47,12 @@ Automated literature review generation using AI. Upload a CSV of research papers
 
 ```bash
 docker build -t lit-review .
+docker buildx build --platform linux/arm64 -t lit-review-local --load .
+docker buildx build --platform linux/arm64 -t lit-review-local --load .
+
+#Or for multi-platform (both ARM64 and AMD64):
+docker buildx build --platform linux/arm64,linux/amd64 -t lit-review-local
+
 docker run -p 8000:8000 -e OPENAI_API_KEY="your-api-key" lit-review
 ```
 

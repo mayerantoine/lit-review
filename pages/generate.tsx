@@ -7,11 +7,18 @@ import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { fetchEventSource, EventSourceMessage } from '@microsoft/fetch-event-source';
 
+interface Citation {
+    id: number;
+    title: string;
+    abstract: string;
+}
+
 export default function RelatedWork() {
     const router = useRouter();
     const [idea, setIdea] = useState<string>('');
     const [isLoading, setIsLoading] = useState<boolean>(true);
     const [error, setError] = useState<string>('');
+    const [citations, setCitations] = useState<Citation[]>([]);
 
     //const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -57,10 +64,13 @@ export default function RelatedWork() {
 
                 // Check for special messages
                 if (data.startsWith('[METADATA]')) {
-                    // Optional: Handle metadata
+                    // Handle metadata and extract citations
                     try {
                         const metadata = JSON.parse(data.substring(10));
                         console.log('Generation metadata:', metadata);
+                        if (metadata.references && Array.isArray(metadata.references)) {
+                            setCitations(metadata.references);
+                        }
                     } catch (_e) {
                         console.error('Failed to parse metadata:', _e);
                     }
@@ -161,16 +171,41 @@ export default function RelatedWork() {
                                 )}
 
                                 {!error && idea && (
-                                    <div className="prose prose-lg max-w-none text-black/80 dark:text-white/80">
-                                        <ReactMarkdown
-                                            remarkPlugins={[remarkGfm, remarkBreaks]}
-                                        >
-                                            {idea}
-                                        </ReactMarkdown>
-                                        {isLoading && (
-                                            <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1"></span>
+                                    <>
+                                        <div className="prose prose-lg max-w-none text-black/80 dark:text-white/80">
+                                            <ReactMarkdown
+                                                remarkPlugins={[remarkGfm, remarkBreaks]}
+                                            >
+                                                {idea}
+                                            </ReactMarkdown>
+                                            {isLoading && (
+                                                <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1"></span>
+                                            )}
+                                        </div>
+
+                                        {citations.length > 0 && (
+                                            <div className="mt-8 pt-6 border-t border-black/10 dark:border-white/10">
+                                                <h3 className="text-xl font-bold text-black dark:text-white mb-4">References</h3>
+                                                <div className="space-y-4">
+                                                    {citations.map((citation) => (
+                                                        <div key={citation.id} className="text-sm">
+                                                            <div className="flex gap-2">
+                                                                <span className="font-mono text-primary flex-shrink-0">[{citation.id}]</span>
+                                                                <div>
+                                                                    <p className="font-semibold text-black dark:text-white mb-1">
+                                                                        {citation.title}
+                                                                    </p>
+                                                                    <p className="text-black/60 dark:text-white/60 text-xs line-clamp-3">
+                                                                        {citation.abstract}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
                                         )}
-                                    </div>
+                                    </>
                                 )}
                             </div>
                             <div className="border-t border-black/10 dark:border-white/10 px-6 py-4 flex justify-end items-center gap-3">

@@ -577,6 +577,17 @@ def generate_related_work_text(
                     citations = re.findall(r'\[(\d+)\]', full_text)
                     unique_citations = sorted(set(int(c) for c in citations))
 
+                    # Extract paper details for cited papers
+                    references = []
+                    for paper_id in unique_citations:
+                        paper = top_k_abstracts[top_k_abstracts['id'] == paper_id]
+                        if not paper.empty:
+                            references.append({
+                                "id": int(paper_id),
+                                "title": str(paper.iloc[0]['title']),
+                                "abstract": str(paper.iloc[0]['abstract'])
+                            })
+
                     # Send metadata as final event (optional)
                     metadata_dict = {
                         "type": "metadata",
@@ -584,7 +595,8 @@ def generate_related_work_text(
                         "length_words": len(full_text.split()),
                         "total_citations": len(citations),
                         "unique_citations": len(unique_citations),
-                        "cited_paper_ids": unique_citations
+                        "cited_paper_ids": unique_citations,
+                        "references": references
                     }
 
                     import json
