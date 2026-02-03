@@ -116,6 +116,39 @@ export default function RelatedWork() {
         };
     }, []);
 
+    const downloadAsMarkdown = () => {
+        // Build markdown content
+        const currentDate = new Date().toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+        });
+
+        let markdown = `# Related Work\n\n`;
+        markdown += `Generated on ${currentDate}\n\n`;
+        markdown += `${idea}\n\n`;
+
+        // Add references section if citations exist
+        if (citations.length > 0) {
+            markdown += `## References\n\n`;
+            citations.forEach((citation) => {
+                markdown += `- [${citation.id}] **${citation.title}**\n`;
+                markdown += `  ${citation.abstract}\n\n`;
+            });
+        }
+
+        // Create blob and download
+        const blob = new Blob([markdown], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `related-work-${new Date().toISOString().split('T')[0]}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
+
     return (
         <div className="flex flex-col min-h-screen">
             {/* Header */}
@@ -209,11 +242,13 @@ export default function RelatedWork() {
                                 )}
                             </div>
                             <div className="border-t border-black/10 dark:border-white/10 px-6 py-4 flex justify-end items-center gap-3">
-                                <button className="inline-flex items-center justify-center h-10 px-4 rounded-lg text-sm font-semibold bg-primary/10 text-primary hover:bg-primary/20 transition-colors">
-                                    Edit
-                                </button>
-                                <button className="inline-flex items-center justify-center h-10 px-4 rounded-lg text-sm font-semibold bg-primary text-white hover:bg-primary/90 transition-colors">
-                                    Export
+                                <button
+                                    onClick={downloadAsMarkdown}
+                                    disabled={isLoading || !idea}
+                                    style={{ backgroundColor: '#1173d4' }}
+                                    className="inline-flex items-center justify-center h-10 px-4 rounded-lg text-sm font-semibold text-white hover:opacity-90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    Download
                                     <span className="material-symbols-outlined text-base ml-1.5 -mr-1">download</span>
                                 </button>
                             </div>

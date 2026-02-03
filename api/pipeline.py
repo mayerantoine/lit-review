@@ -780,27 +780,23 @@ class LiteratureReviewPipeline:
             'columns': list(self.all_abstracts.columns)
         }
 
-    def generate_review(self, query: str) -> PipelineResult:
+    def retrieve_and_rank_papers(self, query: str) -> Tuple[pd.DataFrame, RetrievalStats, ScoringStats]:
         """
-        Generate a literature review from an existing index.
+        Retrieve and rank papers for a given query.
 
-        This method performs Steps 4-7 of the pipeline:
+        This method performs Steps 4-6 of the pipeline:
         4. Retrieve relevant papers using hybrid search
         5. Score papers for relevance
         6. Select top-k papers
-        7. Generate related work text
-
-        Requires that build_index() has been called first, or that the
-        vector store already exists at the configured persist_directory.
 
         Args:
             query: Research query/abstract
 
         Returns:
-            PipelineResult with all outputs and metadata
+            Tuple of (top_k_abstracts DataFrame, RetrievalStats, ScoringStats)
 
         Raises:
-            ProcessingError: If vector store not initialized or generation fails
+            ProcessingError: If vector store not initialized or abstracts not loaded
         """
         # Ensure vector store is initialized
         if self.vector_store is None:
@@ -824,7 +820,7 @@ class LiteratureReviewPipeline:
                     "Please run build_index() first or use the 'index' command."
                 )
 
-        # Load abstracts if not already loaded
+        # Ensure abstracts are loaded
         if self.all_abstracts is None:
             raise ProcessingError(
                 "Abstracts not loaded. Please run load_abstracts_only() or build_index() first with the CSV path."
@@ -852,6 +848,33 @@ class LiteratureReviewPipeline:
             retrieved_abstracts,
             self.config.top_k
         )
+
+        return top_k_abstracts, retrieval_stats, scoring_stats
+
+    def generate_review(self, query: str) -> PipelineResult:
+        """
+        Generate a literature review from an existing index.
+
+        This method performs Steps 4-7 of the pipeline:
+        4. Retrieve relevant papers using hybrid search
+        5. Score papers for relevance
+        6. Select top-k papers
+        7. Generate related work text
+
+        Requires that build_index() has been called first, or that the
+        vector store already exists at the configured persist_directory.
+
+        Args:
+            query: Research query/abstract
+
+        Returns:
+            PipelineResult with all outputs and metadata
+
+        Raises:
+            ProcessingError: If vector store not initialized or generation fails
+        """
+        # Steps 4-6: Retrieve and rank papers
+        top_k_abstracts, retrieval_stats, scoring_stats = self.retrieve_and_rank_papers(query)
 
         # Step 7: Generate related work text
         generated_text, generation_metadata = generate_related_work_text(
@@ -895,56 +918,8 @@ class LiteratureReviewPipeline:
         Raises:
             ProcessingError: If vector store not initialized or generation fails
         """
-        # Ensure vector store is initialized
-        if self.vector_store is None:
-            # Try to load existing index
-            try:
-                samples_abstracts = []  # Empty list since we're loading existing
-                self.vector_store, _ = initialize_vector_store(
-                    samples_abstracts,
-                    self.config.persist_directory,
-                    recreate_index=False  # Never recreate when generating
-                )
-
-                if not self.vector_store.index_exists:
-                    raise ProcessingError(
-                        f"No index found at {self.config.persist_directory}. "
-                        "Please run build_index() first or use the 'index' command."
-                    )
-            except Exception as e:
-                raise ProcessingError(
-                    f"Failed to load vector store: {str(e)}. "
-                    "Please run build_index() first or use the 'index' command."
-                )
-
-        # Load abstracts if not already loaded
-        if self.all_abstracts is None:
-            raise ProcessingError(
-                "Abstracts not loaded. Please run load_abstracts_only() or build_index() first with the CSV path."
-            )
-
-        # Step 4: Retrieve relevant papers
-        retrieved_abstracts, retrieval_stats = retrieve_relevant_papers(
-            self.vector_store,
-            self.all_abstracts,
-            query,
-            self.config.hybrid_k
-        )
-
-        # Step 5: Score papers for relevance
-        relevance_results, scoring_stats = score_papers_relevance(
-            retrieved_abstracts,
-            query,
-            self.config.relevance_model,
-            self.config.num_abstracts_to_score
-        )
-
-        # Step 6: Select top-k papers
-        top_k_abstracts = select_top_papers(
-            relevance_results,
-            retrieved_abstracts,
-            self.config.top_k
-        )
+        # Steps 4-6: Retrieve and rank papers
+        top_k_abstracts, retrieval_stats, scoring_stats = self.retrieve_and_rank_papers(query)
 
         # Step 7: Generate related work text (streaming mode)
         streaming_response = generate_related_work_text(

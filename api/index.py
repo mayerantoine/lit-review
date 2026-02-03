@@ -28,6 +28,10 @@ from dataclasses import asdict
 ## Add agentic retrieval on top of hybrid retreival
 ## Review UI for generate to be on the right
 ## Decoupled Ranking from upload and Index
+## Ui input for top-k,hybrid k, display pro and cons,
+## Change embeddings to openai
+## Test docker deploy App Runner AWS
+## Test docket deploy App Service Azure
 
 class ResearchIdeaRequest(BaseModel):
     research_idea: str
@@ -46,8 +50,10 @@ app.add_middleware(
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-# Global variable to track last uploaded CSV file
-LAST_CSV_PATH = None
+# Global variables to track state
+LAST_CSV_PATH = None  # Track last uploaded CSV file
+TOP_RANKED_PAPERS = None  # Store ranked papers DataFrame after retrieve-and-rank
+LAST_QUERY = None  # Track which query was used for ranking
 
 @app.post("/api/upload-and-index")
 async def upload_and_index(file: UploadFile = File(...)):
@@ -114,16 +120,18 @@ async def upload_and_index(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
-@app.post("/api/generate")
-def lit_review(request: ResearchIdeaRequest):
+@app.post("/api/retrieve-and-rank")
+def retrieve_and_rank(request: ResearchIdeaRequest):
     """
-    Generate related work section using the pipeline with uploaded CSV data (streaming).
+    Retrieve and rank papers for a given research idea (Steps 4-6 of pipeline).
 
-    Requires that /api/upload-and-index has been called first.
+    This endpoint must be called after /api/upload-and-index and before /api/generate.
+    It performs retrieval, relevance scoring, and top-k selection.
+
+    Returns:
+        JSON with top-k papers, retrieval stats, and scoring stats
     """
-    global LAST_CSV_PATH
-
-    # Load environment variables
+    global LAST_CSV_PATH, TOP_RANKED_PAPERS, LAST_QUERY
 
     # Get the research idea from request
     query = request.research_idea.strip()
@@ -161,8 +169,103 @@ def lit_review(request: ResearchIdeaRequest):
         # Load abstracts from the uploaded CSV
         pipeline.load_abstracts_only(LAST_CSV_PATH)
 
-        # Generate the review using streaming
-        streaming_response = pipeline.generate_review_stream(query)
+        # Retrieve and rank papers (Steps 4-6)
+        top_k_abstracts, retrieval_stats, scoring_stats = pipeline.retrieve_and_rank_papers(query)
+
+        # Store results globally for use in /api/generate
+        TOP_RANKED_PAPERS = top_k_abstracts
+        LAST_QUERY = query
+
+        # Convert DataFrame to list of dicts for JSON response
+        papers_list = []
+        for _, paper in top_k_abstracts.iterrows():
+            papers_list.append({
+                "id": int(paper['id']),
+                "title": str(paper['title']),
+                "abstract": str(paper['abstract']),
+                "relevance_score": float(paper['relevance_score'])
+            })
+
+        # Build response
+        response_data = {
+            "success": True,
+            "query": query,
+            "top_papers": papers_list,
+            "retrieval_stats": {
+                "total_papers_in_corpus": retrieval_stats.total_papers_in_corpus,
+                "papers_retrieved": retrieval_stats.papers_retrieved,
+                "retrieval_rate": retrieval_stats.retrieval_rate,
+                "retrieval_k": retrieval_stats.retrieval_k
+            },
+            "scoring_stats": {
+                "papers_scored": scoring_stats.papers_scored,
+                "mean_score": scoring_stats.mean_score,
+                "std_score": scoring_stats.std_score,
+                "min_score": scoring_stats.min_score,
+                "max_score": scoring_stats.max_score,
+                "median_score": scoring_stats.median_score
+            }
+        }
+
+        return JSONResponse(content=response_data)
+
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ProcessingError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+@app.post("/api/generate")
+def lit_review(request: ResearchIdeaRequest):
+    """
+    Generate related work section using pre-ranked papers (streaming).
+
+    Requires that /api/retrieve-and-rank has been called first to rank papers.
+    This endpoint only performs Step 7 (text generation) using the pre-ranked papers.
+    """
+    global TOP_RANKED_PAPERS, LAST_QUERY
+
+    # Get the research idea from request
+    query = request.research_idea.strip()
+
+    # Check if retrieve-and-rank has been called
+    if TOP_RANKED_PAPERS is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No ranked papers found. Please call /api/retrieve-and-rank first to rank papers."
+        )
+
+    # Verify query matches the one used for ranking
+    if LAST_QUERY != query:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query mismatch. Ranked papers were retrieved for a different query. Please call /api/retrieve-and-rank again with the current query."
+        )
+
+    # Initialize pipeline config for generation
+    config = PipelineConfig(
+        persist_directory="./corpus-data/chroma_db",
+        recreate_index=False,
+        hybrid_k=50,
+        num_abstracts_to_score=None,
+        top_k=3,
+        relevance_model="gpt-4o-mini",
+        generation_model="gpt-4o-mini",
+        random_seed=42
+    )
+
+    try:
+        # Import here to avoid circular dependency
+        from pipeline import generate_related_work_text
+
+        # Step 7: Generate related work text (streaming mode) using pre-ranked papers
+        streaming_response = generate_related_work_text(
+            query,
+            TOP_RANKED_PAPERS,
+            config.generation_model,
+            stream=True
+        )
 
         # Return the streaming response
         return streaming_response

@@ -9,6 +9,29 @@ interface IndexStats {
   total_indexed: number;
 }
 
+interface RankedPaper {
+  id: number;
+  title: string;
+  abstract: string;
+  relevance_score: number;
+}
+
+interface RetrievalStats {
+  total_papers_in_corpus: number;
+  papers_retrieved: number;
+  retrieval_rate: number;
+  retrieval_k: number;
+}
+
+interface ScoringStats {
+  papers_scored: number;
+  mean_score: number;
+  std_score: number;
+  min_score: number;
+  max_score: number;
+  median_score: number;
+}
+
 export default function Home() {
   const [researchIdea, setResearchIdea] = useState('');
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -17,6 +40,10 @@ export default function Home() {
   const [isIndexing, setIsIndexing] = useState(false);
   const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
   const [indexError, setIndexError] = useState<string>('');
+  const [isRanking, setIsRanking] = useState(false);
+  const [rankedPapers, setRankedPapers] = useState<RankedPaper[] | null>(null);
+  const [rankingStats, setRankingStats] = useState<{retrieval: RetrievalStats, scoring: ScoringStats} | null>(null);
+  const [rankingError, setRankingError] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
@@ -87,8 +114,51 @@ export default function Home() {
     setFileError('');
     setIndexStats(null);
     setIndexError('');
+    setRankedPapers(null);
+    setRankingStats(null);
+    setRankingError('');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
+    }
+  };
+
+  const handleRetrieveAndRank = async () => {
+    if (!researchIdea.trim()) {
+      setRankingError('Please enter a research idea first');
+      return;
+    }
+
+    setIsRanking(true);
+    setRankingError('');
+    setRankedPapers(null);
+    setRankingStats(null);
+
+    try {
+      const response = await fetch(`/api/retrieve-and-rank`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          research_idea: researchIdea
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to retrieve and rank papers');
+      }
+
+      const result = await response.json();
+      setRankedPapers(result.top_papers);
+      setRankingStats({
+        retrieval: result.retrieval_stats,
+        scoring: result.scoring_stats
+      });
+    } catch (error) {
+      setRankingError(error instanceof Error ? error.message : 'Failed to retrieve and rank papers');
+    } finally {
+      setIsRanking(false);
     }
   };
 
@@ -134,24 +204,17 @@ export default function Home() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
 
+    // Check if papers have been ranked
+    if (!rankedPapers || rankedPapers.length === 0) {
+      setRankingError('Please retrieve and rank papers first before generating');
+      return;
+    }
+
     // Store research idea in sessionStorage
     sessionStorage.setItem('researchIdea', researchIdea);
 
-    // Store file data if uploaded
-    if (uploadedFile) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const csvContent = event.target?.result as string;
-        sessionStorage.setItem('csvFile', csvContent);
-        sessionStorage.setItem('csvFileName', uploadedFile.name);
-        // Navigate to generate page
-        router.push('/generate');
-      };
-      reader.readAsText(uploadedFile);
-    } else {
-      // Navigate without file
-      router.push('/generate');
-    }
+    // Navigate to generate page
+    router.push('/generate');
   };
 
   return (
@@ -349,14 +412,108 @@ export default function Home() {
               )}
             </div>
 
+            {/* Retrieve & Rank Papers Section */}
+            {indexStats && (
+              <div>
+                <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                  Step 2: Retrieve & Rank Relevant Papers
+                </label>
+
+                {!rankedPapers && !isRanking && (
+                  <button
+                    type="button"
+                    onClick={handleRetrieveAndRank}
+                    disabled={isRanking || !researchIdea.trim()}
+                    className="w-full px-6 py-3 text-sm font-semibold text-white rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ backgroundColor: '#1173d4' }}
+                    onMouseEnter={(e) => !isRanking && researchIdea.trim() && (e.currentTarget.style.backgroundColor = '#0d5aa8')}
+                    onMouseLeave={(e) => !isRanking && researchIdea.trim() && (e.currentTarget.style.backgroundColor = '#1173d4')}
+                  >
+                    <span className="material-symbols-outlined">search</span>
+                    Retrieve & Rank Papers
+                  </button>
+                )}
+
+                {isRanking && (
+                  <div className="flex items-center justify-center gap-3 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                    <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+                    <span className="text-sm font-medium text-primary">Retrieving and ranking papers...</span>
+                  </div>
+                )}
+
+                {rankedPapers && rankedPapers.length > 0 && (
+                  <div className="space-y-4">
+                    <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+                      <div className="flex items-start gap-2 mb-3">
+                        <span className="material-symbols-outlined text-green-600 dark:text-green-400 flex-shrink-0">check_circle</span>
+                        <p className="text-sm font-semibold text-green-800 dark:text-green-200">
+                          Papers retrieved and ranked successfully!
+                        </p>
+                      </div>
+
+                      {rankingStats && (
+                        <div className="grid grid-cols-2 gap-3 text-xs text-green-700 dark:text-green-300 mb-3">
+                          <div>
+                            <p className="font-medium">Retrieval Stats:</p>
+                            <p>Retrieved: {rankingStats.retrieval.papers_retrieved} / {rankingStats.retrieval.total_papers_in_corpus}</p>
+                            <p>Rate: {rankingStats.retrieval.retrieval_rate.toFixed(1)}%</p>
+                          </div>
+                          <div>
+                            <p className="font-medium">Scoring Stats:</p>
+                            <p>Mean: {rankingStats.scoring.mean_score.toFixed(1)}</p>
+                            <p>Range: {rankingStats.scoring.min_score.toFixed(1)} - {rankingStats.scoring.max_score.toFixed(1)}</p>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <p className="text-xs font-semibold text-green-800 dark:text-green-200">Top {rankedPapers.length} Papers:</p>
+                        {rankedPapers.map((paper, index) => (
+                          <div key={paper.id} className="p-3 bg-white dark:bg-black/20 rounded-lg border border-green-200/50 dark:border-green-800/50">
+                            <div className="flex items-start justify-between gap-2 mb-1">
+                              <p className="text-xs font-semibold text-black dark:text-white flex-1">
+                                #{index + 1}: {paper.title}
+                              </p>
+                              <span className="text-xs font-mono text-primary whitespace-nowrap">
+                                Score: {paper.relevance_score.toFixed(1)}
+                              </span>
+                            </div>
+                            <p className="text-xs text-black/60 dark:text-white/60 line-clamp-2">
+                              {paper.abstract}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleRetrieveAndRank}
+                      className="text-sm text-primary hover:text-primary/80 font-medium"
+                    >
+                      Re-rank with different query
+                    </button>
+                  </div>
+                )}
+
+                {rankingError && (
+                  <p className="mt-2 text-sm text-red-500 dark:text-red-400 flex items-center gap-1">
+                    <span className="material-symbols-outlined text-base">error</span>
+                    {rankingError}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Generate Button */}
             <div className="flex justify-end">
               <button
                 type="submit"
-                className="w-full sm:w-auto px-8 py-3 text-base font-bold text-white rounded-lg transition-colors flex items-center justify-center gap-2"
+                disabled={!rankedPapers || rankedPapers.length === 0}
+                className="w-full sm:w-auto px-8 py-3 text-base font-bold text-white rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ backgroundColor: '#1173d4' }}
-                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#0d5aa8'}
-                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#1173d4'}
+                onMouseEnter={(e) => rankedPapers && rankedPapers.length > 0 && (e.currentTarget.style.backgroundColor = '#0d5aa8')}
+                onMouseLeave={(e) => rankedPapers && rankedPapers.length > 0 && (e.currentTarget.style.backgroundColor = '#1173d4')}
               >
                 <span className="material-symbols-outlined">auto_awesome</span>
                 Generate Related Work
