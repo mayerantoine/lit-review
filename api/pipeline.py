@@ -501,7 +501,7 @@ def select_top_papers(
 
 def generate_related_work_text(
     query: str,
-    top_k_abstracts: pd.DataFrame,
+    selected_papers: pd.DataFrame,
     generation_model: str,
     stream: bool = True
 ) -> Union[Tuple[str, GenerationMetadata], 'StreamingResponse']:
@@ -510,7 +510,7 @@ def generate_related_work_text(
 
     Args:
         query: Research query/abstract
-        top_k_abstracts: Top-k most relevant papers
+        selected_papers: Selected papers to use for generation
         generation_model: OpenAI model to use
         stream: If True, returns StreamingResponse. If False, returns (text, metadata) tuple
 
@@ -538,7 +538,7 @@ def generate_related_work_text(
         input_related_work = f"Given the Research Idea or abstract: {query}"
         input_related_work += "\n\n## Given references abstracts list below:"
 
-        for index, item in top_k_abstracts[['id', 'title_abstract']].iterrows():
+        for index, item in selected_papers[['id', 'title_abstract']].iterrows():
             input_related_work += f"\n\n[{item['id']}]: {item['title_abstract']}"
 
         input_related_work += "\n\nWrite the related work section summarizing in a cohesive story prior works relevant to the research idea."
@@ -580,7 +580,7 @@ def generate_related_work_text(
                     # Extract paper details for cited papers
                     references = []
                     for paper_id in unique_citations:
-                        paper = top_k_abstracts[top_k_abstracts['id'] == paper_id]
+                        paper = selected_papers[selected_papers['id'] == paper_id]
                         if not paper.empty:
                             references.append({
                                 "id": int(paper_id),
@@ -646,7 +646,7 @@ def generate_related_work_text(
 def format_output_for_file(
     query: str,
     generated_text: str,
-    top_k_abstracts: pd.DataFrame
+    selected_papers: pd.DataFrame
 ) -> str:
     """
     Format the complete output for saving to file.
@@ -675,7 +675,7 @@ def format_output_for_file(
     output.append("REFERENCES:")
     output.append("-" * 80)
     for paper_id in unique_citations:
-        paper = top_k_abstracts[top_k_abstracts['id'] == paper_id]
+        paper = selected_papers[selected_papers['id'] == paper_id]
         if not paper.empty:
             output.append(f"[{paper_id}] {paper.iloc[0]['title']}")
             output.append(f"    {paper.iloc[0]['abstract'][:200]}...\n")
@@ -780,7 +780,7 @@ class LiteratureReviewPipeline:
             'columns': list(self.all_abstracts.columns)
         }
 
-    def retrieve_and_rank_papers(self, query: str) -> Tuple[pd.DataFrame, RetrievalStats, ScoringStats]:
+    def retrieve_and_rank_papers(self, query: str) -> Tuple[pd.DataFrame, pd.DataFrame, RetrievalStats, ScoringStats]:
         """
         Retrieve and rank papers for a given query.
 
@@ -793,7 +793,7 @@ class LiteratureReviewPipeline:
             query: Research query/abstract
 
         Returns:
-            Tuple of (top_k_abstracts DataFrame, RetrievalStats, ScoringStats)
+            Tuple of (top_k_abstracts DataFrame, all_scored_papers DataFrame, RetrievalStats, ScoringStats)
 
         Raises:
             ProcessingError: If vector store not initialized or abstracts not loaded
@@ -842,6 +842,18 @@ class LiteratureReviewPipeline:
             self.config.num_abstracts_to_score
         )
 
+        # Create DataFrame with ALL scored papers
+        all_scores = [(abs.id, abs.probability_score) for abs in relevance_results]
+        sorted_all_scores = sorted(all_scores, key=lambda x: x[1], reverse=True)
+
+        all_scored_ids = [id for id, score in sorted_all_scores]
+        all_scored_papers = retrieved_abstracts[retrieved_abstracts['id'].isin(all_scored_ids)].copy()
+
+        # Add scores to all papers
+        score_dict_all = {id: score for id, score in sorted_all_scores}
+        all_scored_papers['relevance_score'] = all_scored_papers['id'].map(score_dict_all)
+        all_scored_papers = all_scored_papers.sort_values('relevance_score', ascending=False)
+
         # Step 6: Select top-k papers
         top_k_abstracts = select_top_papers(
             relevance_results,
@@ -849,7 +861,7 @@ class LiteratureReviewPipeline:
             self.config.top_k
         )
 
-        return top_k_abstracts, retrieval_stats, scoring_stats
+        return top_k_abstracts, all_scored_papers, retrieval_stats, scoring_stats
 
     def generate_review(self, query: str) -> PipelineResult:
         """
@@ -874,7 +886,7 @@ class LiteratureReviewPipeline:
             ProcessingError: If vector store not initialized or generation fails
         """
         # Steps 4-6: Retrieve and rank papers
-        top_k_abstracts, retrieval_stats, scoring_stats = self.retrieve_and_rank_papers(query)
+        top_k_abstracts, _, retrieval_stats, scoring_stats = self.retrieve_and_rank_papers(query)
 
         # Step 7: Generate related work text
         generated_text, generation_metadata = generate_related_work_text(
@@ -919,7 +931,7 @@ class LiteratureReviewPipeline:
             ProcessingError: If vector store not initialized or generation fails
         """
         # Steps 4-6: Retrieve and rank papers
-        top_k_abstracts, retrieval_stats, scoring_stats = self.retrieve_and_rank_papers(query)
+        top_k_abstracts, _, retrieval_stats, scoring_stats = self.retrieve_and_rank_papers(query)
 
         # Step 7: Generate related work text (streaming mode)
         streaming_response = generate_related_work_text(

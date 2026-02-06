@@ -35,6 +35,8 @@ from dataclasses import asdict
 
 class ResearchIdeaRequest(BaseModel):
     research_idea: str
+    hybrid_k: int | None = 50
+    selected_paper_ids: list[int] | None = None
 
 app = FastAPI()
 # Configure CORS for Next.js
@@ -151,11 +153,14 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
             detail="CSV file not found. Please upload the file again."
         )
 
+    # Validate and clamp hybrid_k to valid range
+    hybrid_k_value = min(max(request.hybrid_k or 50, 1), 200)
+
     # Initialize pipeline with same config as indexing
     config = PipelineConfig(
         persist_directory="./corpus-data/chroma_db",
         recreate_index=False,  # Use existing index
-        hybrid_k=50,
+        hybrid_k=hybrid_k_value,
         num_abstracts_to_score=None,
         top_k=3,
         relevance_model="gpt-4o-mini",
@@ -170,16 +175,27 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
         pipeline.load_abstracts_only(LAST_CSV_PATH)
 
         # Retrieve and rank papers (Steps 4-6)
-        top_k_abstracts, retrieval_stats, scoring_stats = pipeline.retrieve_and_rank_papers(query)
+        top_k_abstracts, all_scored_papers, retrieval_stats, scoring_stats = pipeline.retrieve_and_rank_papers(query)
 
         # Store results globally for use in /api/generate
-        TOP_RANKED_PAPERS = top_k_abstracts
+        # Store ALL scored papers so users can select from any of them
+        TOP_RANKED_PAPERS = all_scored_papers
         LAST_QUERY = query
 
-        # Convert DataFrame to list of dicts for JSON response
-        papers_list = []
+        # Convert top-k DataFrame to list of dicts for JSON response
+        top_papers_list = []
         for _, paper in top_k_abstracts.iterrows():
-            papers_list.append({
+            top_papers_list.append({
+                "id": int(paper['id']),
+                "title": str(paper['title']),
+                "abstract": str(paper['abstract']),
+                "relevance_score": float(paper['relevance_score'])
+            })
+
+        # Convert ALL scored papers DataFrame to list of dicts
+        all_scored_papers_list = []
+        for _, paper in all_scored_papers.iterrows():
+            all_scored_papers_list.append({
                 "id": int(paper['id']),
                 "title": str(paper['title']),
                 "abstract": str(paper['abstract']),
@@ -190,7 +206,8 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
         response_data = {
             "success": True,
             "query": query,
-            "top_papers": papers_list,
+            "top_papers": top_papers_list,
+            "all_scored_papers": all_scored_papers_list,
             "retrieval_stats": {
                 "total_papers_in_corpus": retrieval_stats.total_papers_in_corpus,
                 "papers_retrieved": retrieval_stats.papers_retrieved,
@@ -243,6 +260,17 @@ def lit_review(request: ResearchIdeaRequest):
             detail=f"Query mismatch. Ranked papers were retrieved for a different query. Please call /api/retrieve-and-rank again with the current query."
         )
 
+    # Filter papers based on selected_paper_ids if provided
+    papers_to_use = TOP_RANKED_PAPERS
+    if request.selected_paper_ids is not None and len(request.selected_paper_ids) > 0:
+        # Filter to only include selected papers
+        papers_to_use = TOP_RANKED_PAPERS[TOP_RANKED_PAPERS['id'].isin(request.selected_paper_ids)]
+        if len(papers_to_use) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="None of the selected paper IDs were found in the ranked papers."
+            )
+
     # Initialize pipeline config for generation
     config = PipelineConfig(
         persist_directory="./corpus-data/chroma_db",
@@ -259,10 +287,10 @@ def lit_review(request: ResearchIdeaRequest):
         # Import here to avoid circular dependency
         from pipeline import generate_related_work_text
 
-        # Step 7: Generate related work text (streaming mode) using pre-ranked papers
+        # Step 7: Generate related work text (streaming mode) using selected papers
         streaming_response = generate_related_work_text(
             query,
-            TOP_RANKED_PAPERS,
+            papers_to_use,
             config.generation_model,
             stream=True
         )

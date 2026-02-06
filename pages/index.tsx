@@ -1,7 +1,10 @@
 "use client"
 
-import { useState, FormEvent, useRef, DragEvent, ChangeEvent } from 'react';
-import { useRouter } from 'next/router';
+import { useState, FormEvent, useRef, DragEvent, ChangeEvent, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
+import { fetchEventSource, EventSourceMessage } from '@microsoft/fetch-event-source';
 
 interface IndexStats {
   total_abstracts: number;
@@ -32,6 +35,12 @@ interface ScoringStats {
   median_score: number;
 }
 
+interface Citation {
+  id: number;
+  title: string;
+  abstract: string;
+}
+
 export default function Home() {
   const [researchIdea, setResearchIdea] = useState('');
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -42,12 +51,41 @@ export default function Home() {
   const [indexError, setIndexError] = useState<string>('');
   const [isRanking, setIsRanking] = useState(false);
   const [rankedPapers, setRankedPapers] = useState<RankedPaper[] | null>(null);
+  const [allScoredPapers, setAllScoredPapers] = useState<RankedPaper[] | null>(null);
   const [rankingStats, setRankingStats] = useState<{retrieval: RetrievalStats, scoring: ScoringStats} | null>(null);
   const [rankingError, setRankingError] = useState<string>('');
+  const [hybridK, setHybridK] = useState<number>(50);
+  const [selectionMode, setSelectionMode] = useState<'top_k' | 'min_score'>('top_k');
+  const [customTopK, setCustomTopK] = useState<number>(3);
+  const [minScore, setMinScore] = useState<number>(0);
+  const [selectedPapersForGeneration, setSelectedPapersForGeneration] = useState<RankedPaper[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const router = useRouter();
+
+  // Generation-related states
+  const [generatedText, setGeneratedText] = useState<string>('');
+  const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [generateError, setGenerateError] = useState<string>('');
+  const [citations, setCitations] = useState<Citation[]>([]);
 
   //const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+  // Filter papers based on selection mode and criteria
+  useEffect(() => {
+    if (!allScoredPapers || allScoredPapers.length === 0) {
+      setSelectedPapersForGeneration([]);
+      return;
+    }
+
+    if (selectionMode === 'top_k') {
+      // Select top N papers
+      const selected = allScoredPapers.slice(0, Math.min(customTopK, allScoredPapers.length));
+      setSelectedPapersForGeneration(selected);
+    } else {
+      // Filter papers by minimum score
+      const selected = allScoredPapers.filter(paper => paper.relevance_score >= minScore);
+      setSelectedPapersForGeneration(selected);
+    }
+  }, [allScoredPapers, selectionMode, customTopK, minScore]);
 
   const validateFile = (file: File): boolean => {
     // Reset error
@@ -115,6 +153,7 @@ export default function Home() {
     setIndexStats(null);
     setIndexError('');
     setRankedPapers(null);
+    setAllScoredPapers(null);
     setRankingStats(null);
     setRankingError('');
     if (fileInputRef.current) {
@@ -131,6 +170,7 @@ export default function Home() {
     setIsRanking(true);
     setRankingError('');
     setRankedPapers(null);
+    setAllScoredPapers(null);
     setRankingStats(null);
 
     try {
@@ -140,7 +180,8 @@ export default function Home() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          research_idea: researchIdea
+          research_idea: researchIdea,
+          hybrid_k: hybridK
         }),
       });
 
@@ -151,6 +192,7 @@ export default function Home() {
 
       const result = await response.json();
       setRankedPapers(result.top_papers);
+      setAllScoredPapers(result.all_scored_papers);
       setRankingStats({
         retrieval: result.retrieval_stats,
         scoring: result.scoring_stats
@@ -201,20 +243,141 @@ export default function Home() {
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   };
 
+  const handleGenerate = async () => {
+    setIsGenerating(true);
+    setGenerateError('');
+    setGeneratedText('');
+    setCitations([]);
+
+    const controller = new AbortController();
+
+    try {
+      await fetchEventSource('/api/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          research_idea: researchIdea,
+          selected_paper_ids: selectedPapersForGeneration.map(p => p.id)
+        }),
+        signal: controller.signal,
+
+        async onopen(response) {
+          if (response.ok) {
+            return; // Success
+          } else if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+            // Client error - don't retry
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to generate review');
+          } else {
+            // Server error or rate limit - could retry
+            throw new Error('Server error occurred');
+          }
+        },
+
+        onmessage(event: EventSourceMessage) {
+          const data = event.data;
+
+          // Check for special messages
+          if (data.startsWith('[METADATA]')) {
+            // Handle metadata and extract citations
+            try {
+              const metadata = JSON.parse(data.substring(10));
+              console.log('Generation metadata:', metadata);
+              if (metadata.references && Array.isArray(metadata.references)) {
+                setCitations(metadata.references);
+              }
+            } catch (_e) {
+              console.error('Failed to parse metadata:', _e);
+            }
+          } else if (data === '[DONE]') {
+            // Stream complete
+            setIsGenerating(false);
+          } else if (data.startsWith('[ERROR]')) {
+            // Error occurred
+            try {
+              const errorData = JSON.parse(data.substring(7));
+              setGenerateError(errorData.message || 'An error occurred during generation');
+            } catch {
+              setGenerateError('An error occurred during generation');
+            }
+            setIsGenerating(false);
+          } else {
+            // Regular text chunk - append to generatedText
+            setGeneratedText(prev => prev + data);
+          }
+        },
+
+        onerror(err: unknown) {
+          setIsGenerating(false);
+          const errorMessage = err instanceof Error ? err.message : 'Connection error. Please try again.';
+          setGenerateError(errorMessage);
+          throw err; // Stop retrying
+        },
+
+        onclose() {
+          // Stream closed
+          setIsGenerating(false);
+        }
+      });
+    } catch (err: unknown) {
+      setIsGenerating(false);
+      if (err instanceof Error && err.name !== 'AbortError') {
+        setGenerateError(err.message || 'Failed to generate review');
+      }
+    }
+  };
+
+  const downloadAsMarkdown = () => {
+    // Build markdown content
+    const currentDate = new Date().toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
+    let markdown = `# Related Work\n\n`;
+    markdown += `Generated on ${currentDate}\n\n`;
+    markdown += `${generatedText}\n\n`;
+
+    // Add references section if citations exist
+    if (citations.length > 0) {
+      markdown += `## References\n\n`;
+      citations.forEach((citation) => {
+        markdown += `- [${citation.id}] **${citation.title}**\n`;
+        markdown += `  ${citation.abstract}\n\n`;
+      });
+    }
+
+    // Create blob and download
+    const blob = new Blob([markdown], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `related-work-${new Date().toISOString().split('T')[0]}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
 
-    // Check if papers have been ranked
-    if (!rankedPapers || rankedPapers.length === 0) {
+    // Check if papers have been ranked and selected
+    if (!allScoredPapers || allScoredPapers.length === 0) {
       setRankingError('Please retrieve and rank papers first before generating');
       return;
     }
 
-    // Store research idea in sessionStorage
-    sessionStorage.setItem('researchIdea', researchIdea);
+    if (!selectedPapersForGeneration || selectedPapersForGeneration.length === 0) {
+      setRankingError('Please select at least one paper for generation');
+      return;
+    }
 
-    // Navigate to generate page
-    router.push('/generate');
+    // Trigger generation
+    handleGenerate();
   };
 
   return (
@@ -233,21 +396,23 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-grow flex items-center justify-center p-6">
-        <div className="w-full max-w-2xl mx-auto space-y-8">
-          {/* Hero Section */}
-          <div className="text-center">
-            <h2 className="text-3xl font-bold text-black dark:text-white">
-              Generate Related Work
-            </h2>
-            <p className="mt-2 text-black/60 dark:text-white/60">
-              Start by providing your research idea and a list of references.
-            </p>
-          </div>
+      {/* Main Content - Split Panel Layout */}
+      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+        {/* Left Panel - Input Form */}
+        <div className="w-full lg:w-1/2 p-6 overflow-y-auto border-b lg:border-b-0 lg:border-r border-black/10 dark:border-white/10">
+          <div className="max-w-2xl mx-auto space-y-8">
+            {/* Hero Section */}
+            <div className="text-center lg:text-left">
+              <h2 className="text-3xl font-bold text-black dark:text-white">
+                Generate Related Work
+              </h2>
+              <p className="mt-2 text-black/60 dark:text-white/60">
+                Start by providing your research idea and a list of references.
+              </p>
+            </div>
 
-          {/* Form */}
-          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Form */}
+            <form onSubmit={handleSubmit} className="space-y-6">
             {/* Research Idea Input */}
             <div>
               <label
@@ -419,6 +584,29 @@ export default function Home() {
                   Step 2: Retrieve & Rank Relevant Papers
                 </label>
 
+                {/* Hybrid K Control */}
+                <div className="mb-4 p-4 bg-white dark:bg-black/20 rounded-lg border border-black/10 dark:border-white/10">
+                  <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                    Number of papers to retrieve (Hybrid K)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="200"
+                    value={hybridK}
+                    onChange={(e) => {
+                      const value = parseInt(e.target.value);
+                      if (!isNaN(value) && value >= 1 && value <= 200) {
+                        setHybridK(value);
+                      }
+                    }}
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-black/10 dark:border-white/10 focus:ring-2 focus:ring-primary focus:border-primary transition duration-200 text-black dark:text-white"
+                  />
+                  <p className="mt-1 text-xs text-black/60 dark:text-white/60">
+                    Controls how many papers are retrieved before ranking (default: 50, range: 1-200)
+                  </p>
+                </div>
+
                 {!rankedPapers && !isRanking && (
                   <button
                     type="button"
@@ -441,7 +629,7 @@ export default function Home() {
                   </div>
                 )}
 
-                {rankedPapers && rankedPapers.length > 0 && (
+                {allScoredPapers && allScoredPapers.length > 0 && (
                   <div className="space-y-4">
                     <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
                       <div className="flex items-start gap-2 mb-3">
@@ -467,31 +655,143 @@ export default function Home() {
                       )}
 
                       <div className="space-y-2">
-                        <p className="text-xs font-semibold text-green-800 dark:text-green-200">Top {rankedPapers.length} Papers:</p>
-                        {rankedPapers.map((paper, index) => (
-                          <div key={paper.id} className="p-3 bg-white dark:bg-black/20 rounded-lg border border-green-200/50 dark:border-green-800/50">
-                            <div className="flex items-start justify-between gap-2 mb-1">
-                              <p className="text-xs font-semibold text-black dark:text-white flex-1">
-                                #{index + 1}: {paper.title}
-                              </p>
-                              <span className="text-xs font-mono text-primary whitespace-nowrap">
-                                Score: {paper.relevance_score.toFixed(1)}
-                              </span>
-                            </div>
-                            <p className="text-xs text-black/60 dark:text-white/60 line-clamp-2">
-                              {paper.abstract}
-                            </p>
+                        {/* Paper Selection Controls */}
+                        <div className="p-3 bg-white dark:bg-black/30 rounded-lg border border-green-300/50 dark:border-green-700/50">
+                          <p className="text-xs font-semibold text-green-800 dark:text-green-200 mb-3">
+                            Select papers for generation:
+                          </p>
+
+                          {/* Mode Toggle */}
+                          <div className="flex gap-2 mb-3">
+                            <button
+                              type="button"
+                              onClick={() => setSelectionMode('top_k')}
+                              className={`flex-1 px-3 py-2 text-xs font-semibold rounded-lg transition-colors ${
+                                selectionMode === 'top_k'
+                                  ? 'bg-primary text-white'
+                                  : 'bg-white dark:bg-black/20 text-black/70 dark:text-white/70 border border-black/10 dark:border-white/10'
+                              }`}
+                            >
+                              Top K Papers
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectionMode('min_score')}
+                              className={`flex-1 px-3 py-2 text-xs font-semibold rounded-lg transition-colors ${
+                                selectionMode === 'min_score'
+                                  ? 'bg-primary text-white'
+                                  : 'bg-white dark:bg-black/20 text-black/70 dark:text-white/70 border border-black/10 dark:border-white/10'
+                              }`}
+                            >
+                              Min Score
+                            </button>
                           </div>
-                        ))}
+
+                          {/* Top K Slider */}
+                          {selectionMode === 'top_k' && (
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <label className="text-xs font-medium text-green-800 dark:text-green-200">
+                                  Number of papers: {customTopK}
+                                </label>
+                                <span className="text-xs text-green-700 dark:text-green-300">
+                                  {selectedPapersForGeneration.length} selected
+                                </span>
+                              </div>
+                              <input
+                                type="range"
+                                min="1"
+                                max={allScoredPapers.length}
+                                value={customTopK}
+                                onChange={(e) => setCustomTopK(parseInt(e.target.value))}
+                                className="w-full h-2 bg-green-200 dark:bg-green-800/50 rounded-lg appearance-none cursor-pointer accent-primary"
+                              />
+                            </div>
+                          )}
+
+                          {/* Min Score Slider */}
+                          {selectionMode === 'min_score' && (
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <label className="text-xs font-medium text-green-800 dark:text-green-200">
+                                  Minimum score: {minScore}
+                                </label>
+                                <span className="text-xs text-green-700 dark:text-green-300">
+                                  {selectedPapersForGeneration.length} selected
+                                </span>
+                              </div>
+                              <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                value={minScore}
+                                onChange={(e) => setMinScore(parseInt(e.target.value))}
+                                className="w-full h-2 bg-green-200 dark:bg-green-800/50 rounded-lg appearance-none cursor-pointer accent-primary"
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-xs font-semibold text-green-800 dark:text-green-200">
+                            All Retrieved Papers ({allScoredPapers.length} total, {selectedPapersForGeneration.length} selected for generation):
+                          </p>
+                        </div>
+
+                        {/* Scrollable container for all papers */}
+                        <div className="max-h-96 overflow-y-auto space-y-2 pr-2">
+                          {allScoredPapers.map((paper, index) => {
+                            const isSelected = selectedPapersForGeneration.some(p => p.id === paper.id);
+                            return (
+                              <div
+                                key={paper.id}
+                                className={`p-3 rounded-lg border ${
+                                  isSelected
+                                    ? 'bg-primary/5 dark:bg-primary/10 border-primary/30 ring-1 ring-primary/20'
+                                    : 'bg-white dark:bg-black/20 border-green-200/50 dark:border-green-800/50'
+                                }`}
+                              >
+                                <div className="flex items-start gap-2 mb-2">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="text-xs font-mono bg-black/5 dark:bg-white/5 text-black/70 dark:text-white/70 px-2 py-0.5 rounded">
+                                      ID: {paper.id}
+                                    </span>
+                                    <span className="text-xs font-mono text-black/50 dark:text-white/50">
+                                      Rank #{index + 1}
+                                    </span>
+                                    {isSelected && (
+                                      <span className="text-xs font-semibold bg-primary text-white px-2 py-0.5 rounded">
+                                        Selected
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-xs font-mono text-primary whitespace-nowrap ml-auto">
+                                    Score: {paper.relevance_score.toFixed(1)}
+                                  </span>
+                                </div>
+                                <p className="text-xs font-semibold text-black dark:text-white mb-1">
+                                  {paper.title}
+                                </p>
+                                <p className="text-xs text-black/60 dark:text-white/60 line-clamp-2">
+                                  {paper.abstract}
+                                </p>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
 
                     <button
                       type="button"
                       onClick={handleRetrieveAndRank}
-                      className="text-sm text-primary hover:text-primary/80 font-medium"
+                      className="w-full px-6 py-3 text-sm font-semibold text-white rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2"
+                      style={{ backgroundColor: '#1173d4' }}
+                      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#0d5aa8')}
+                      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#1173d4')}
                     >
-                      Re-rank with different query
+                      <span className="material-symbols-outlined">refresh</span>
+                      Re-rank with Different Query
                     </button>
                   </div>
                 )}
@@ -509,17 +809,134 @@ export default function Home() {
             <div className="flex justify-end">
               <button
                 type="submit"
-                disabled={!rankedPapers || rankedPapers.length === 0}
+                disabled={!selectedPapersForGeneration || selectedPapersForGeneration.length === 0 || isGenerating}
                 className="w-full sm:w-auto px-8 py-3 text-base font-bold text-white rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ backgroundColor: '#1173d4' }}
-                onMouseEnter={(e) => rankedPapers && rankedPapers.length > 0 && (e.currentTarget.style.backgroundColor = '#0d5aa8')}
-                onMouseLeave={(e) => rankedPapers && rankedPapers.length > 0 && (e.currentTarget.style.backgroundColor = '#1173d4')}
+                onMouseEnter={(e) => selectedPapersForGeneration && selectedPapersForGeneration.length > 0 && !isGenerating && (e.currentTarget.style.backgroundColor = '#0d5aa8')}
+                onMouseLeave={(e) => selectedPapersForGeneration && selectedPapersForGeneration.length > 0 && !isGenerating && (e.currentTarget.style.backgroundColor = '#1173d4')}
               >
-                <span className="material-symbols-outlined">auto_awesome</span>
-                Generate Related Work
+                {isGenerating ? (
+                  <>
+                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <span className="material-symbols-outlined">auto_awesome</span>
+                    Generate Related Work
+                  </>
+                )}
               </button>
             </div>
           </form>
+          </div>
+        </div>
+
+        {/* Right Panel - Generated Content */}
+        <div className="w-full lg:w-1/2 p-6 overflow-y-auto bg-gray-50 dark:bg-black/20">
+          <div className="max-w-4xl mx-auto">
+            {/* Placeholder State - No generation yet */}
+            {!generatedText && !isGenerating && !generateError && (
+              <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-center">
+                <div className="w-16 h-16 mb-4 text-black/20 dark:text-white/20">
+                  <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <h3 className="text-xl font-semibold text-black/60 dark:text-white/60 mb-2">
+                  Generated Content Will Appear Here
+                </h3>
+                <p className="text-sm text-black/40 dark:text-white/40 max-w-md">
+                  Complete the steps on the left, then click "Generate Related Work" to see your literature review section.
+                </p>
+              </div>
+            )}
+
+            {/* Error State */}
+            {generateError && (
+              <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                <div className="flex items-start gap-3">
+                  <span className="material-symbols-outlined text-red-600 dark:text-red-400 flex-shrink-0">error</span>
+                  <div>
+                    <h3 className="text-sm font-semibold text-red-800 dark:text-red-200 mb-1">Generation Error</h3>
+                    <p className="text-sm text-red-700 dark:text-red-300">{generateError}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Loading State */}
+            {isGenerating && !generatedText && (
+              <div className="flex items-center justify-center gap-3 p-8">
+                <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+                <span className="text-sm font-medium text-primary">Generating related work section...</span>
+              </div>
+            )}
+
+            {/* Generated Content */}
+            {generatedText && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-2xl font-bold text-black dark:text-white">Related Work</h2>
+                    <p className="text-sm text-black/50 dark:text-white/50 mt-1">
+                      Generated on {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-white dark:bg-black/40 border border-black/10 dark:border-white/10 rounded-lg shadow-sm">
+                  <div className="p-6">
+                    <div className="prose prose-lg max-w-none text-black/80 dark:text-white/80">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkBreaks]}
+                      >
+                        {generatedText}
+                      </ReactMarkdown>
+                      {isGenerating && (
+                        <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1"></span>
+                      )}
+                    </div>
+
+                    {citations.length > 0 && (
+                      <div className="mt-8 pt-6 border-t border-black/10 dark:border-white/10">
+                        <h3 className="text-xl font-bold text-black dark:text-white mb-4">References</h3>
+                        <div className="space-y-4">
+                          {citations.map((citation) => (
+                            <div key={citation.id} className="text-sm">
+                              <div className="flex gap-2">
+                                <span className="font-mono text-primary flex-shrink-0">[{citation.id}]</span>
+                                <div>
+                                  <p className="font-semibold text-black dark:text-white mb-1">
+                                    {citation.title}
+                                  </p>
+                                  <p className="text-black/60 dark:text-white/60 text-xs line-clamp-3">
+                                    {citation.abstract}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="border-t border-black/10 dark:border-white/10 px-6 py-4 flex justify-end items-center gap-3">
+                    <button
+                      onClick={downloadAsMarkdown}
+                      disabled={isGenerating || !generatedText}
+                      style={{ backgroundColor: '#1173d4' }}
+                      className="inline-flex items-center justify-center h-10 px-4 rounded-lg text-sm font-semibold text-white hover:opacity-90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Download
+                      <span className="material-symbols-outlined text-base ml-1.5 -mr-1">download</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </main>
     </div>
