@@ -29,9 +29,30 @@ from dataclasses import asdict
 ## Review UI for generate to be on the right
 ## Decoupled Ranking from upload and Index
 ## Ui input for top-k,hybrid k, display pro and cons,
+
 ## Change embeddings to openai
+
+#### Use terraform to help for both deployment
+
+## AWS branch
+## should work both local on AWS
+## Move from Chroma to Beckrok KB
 ## Test docker deploy App Runner AWS
-## Test docket deploy App Service Azure
+##-----> Frontend and backend stored in container  + Bedrock KB
+## Move away from App Runnner to Lambda
+## Uses terraform for provisioning
+##-----> Frontend static S3+CloudFront and backend in Lambda + Bedrock KB
+
+#### Azure branch
+## work both with AzureOpenAI and OpenAI
+## should work both local and AzureWebApp
+## Keep using Chroma but add mount AzureShareFile
+##-----> Frontend and backend in container + ChromaDB in AzureShare File
+
+## Test docker deploy App Service Azure
+## Develop 3 tests datasets with comparable generated work section
+## Improve Both UI
+
 
 class ResearchIdeaRequest(BaseModel):
     research_idea: str

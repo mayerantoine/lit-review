@@ -847,7 +847,7 @@ export default function Home() {
                   Generated Content Will Appear Here
                 </h3>
                 <p className="text-sm text-black/40 dark:text-white/40 max-w-md">
-                  Complete the steps on the left, then click "Generate Related Work" to see your literature review section.
+                  Complete the steps on the left, then click &ldquo;Generate Related Work&rdquo; to see your literature review section.
                 </p>
               </div>
             )}
