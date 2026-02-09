@@ -7,6 +7,7 @@ This makes them reusable in different contexts (CLI, notebooks, APIs, tests).
 """
 
 import asyncio
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,18 @@ import openai
 from agents import Agent, Runner
 
 from vectorstore import VectorStoreAbstract
+
+# Environment-aware configuration (matches api/index.py)
+DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "local")
+
+# Auto-detect ChromaDB persist directory based on environment
+if DEPLOYMENT_ENV == "azure":
+    DEFAULT_PERSIST_DIR = "/data/chromadb"
+else:
+    DEFAULT_PERSIST_DIR = "./corpus-data/chroma_db"
+
+# Allow override via environment variable
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
 
 
 # ============================================================================
@@ -42,7 +55,7 @@ class AbstractRelevance(BaseModel):
 @dataclass
 class PipelineConfig:
     """Configuration for the literature review pipeline."""
-    persist_directory: str = "./corpus-data/chroma_db"
+    persist_directory: str = CHROMA_PERSIST_DIR
     recreate_index: bool = False
     hybrid_k: int = 50
     num_abstracts_to_score: Optional[int] = None

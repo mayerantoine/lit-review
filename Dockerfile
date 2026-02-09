@@ -39,6 +39,9 @@ RUN uv sync --frozen --no-cache
 # Install curl for health checks
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
+# Create directory for Azure Files mount (ChromaDB persistence)
+RUN mkdir -p /data/chromadb && chmod 777 /data/chromadb
+
 # Copy the FastAPI server
 COPY api/index.py .
 COPY api/pipeline.py .

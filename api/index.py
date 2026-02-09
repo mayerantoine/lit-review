@@ -1,5 +1,17 @@
 import os
 
+# Environment configuration for deployment flexibility
+DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "local")
+
+# Auto-detect ChromaDB persist directory based on environment
+if DEPLOYMENT_ENV == "azure":
+    DEFAULT_PERSIST_DIR = "/data/chromadb"
+else:
+    DEFAULT_PERSIST_DIR = "./corpus-data/chroma_db"
+
+# Allow override via environment variable
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -103,7 +115,7 @@ async def upload_and_index(file: UploadFile = File(...)):
 
     # Initialize pipeline with config
     config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+        persist_directory=CHROMA_PERSIST_DIR,
         recreate_index=True,  # Always recreate on new upload
         hybrid_k=50,
         num_abstracts_to_score=None,
@@ -157,7 +169,7 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
     query = request.research_idea.strip()
 
     # Check if vector index exists
-    index_db_path = Path("./corpus-data/chroma_db/chroma.sqlite3")
+    index_db_path = Path(CHROMA_PERSIST_DIR) / "chroma.sqlite3"
     if not index_db_path.exists():
         raise HTTPException(
             status_code=400,
@@ -176,7 +188,7 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
 
     # Initialize pipeline with same config as indexing
     config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+        persist_directory=CHROMA_PERSIST_DIR,
         recreate_index=False,  # Use existing index
         hybrid_k=hybrid_k_value,
         num_abstracts_to_score=None,
@@ -291,7 +303,7 @@ def lit_review(request: ResearchIdeaRequest):
 
     # Initialize pipeline config for generation
     config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+        persist_directory=CHROMA_PERSIST_DIR,
         recreate_index=False,
         hybrid_k=50,
         num_abstracts_to_score=None,
