@@ -7,7 +7,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter, HTMLSectionSplitter
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import OpenAIEmbeddings
 #from langchain.retrievers import EnsembleRetriever
 from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
@@ -19,7 +19,7 @@ class VectorStoreAbstract():
         self.recreate_index = recreate_index
         
         # Initialize components
-        self.embeddings: Optional[HuggingFaceEmbeddings] = None
+        self.embeddings: Optional[OpenAIEmbeddings] = None
         self.vectorstore: Optional[Chroma] = None
         self.retriever: Optional[Any] = None
         self.text_splitter: Optional[RecursiveCharacterTextSplitter] = None
@@ -51,9 +51,9 @@ class VectorStoreAbstract():
                         length_function=len,
                         separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""])
 
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2",
-            show_progress=False)
+        self.embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small"
+        )
 
 
         # Initialize ChromaDB vector store

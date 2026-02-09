@@ -1,7 +1,4 @@
 import os
-# Set tokenizers parallelism to false before any imports that load HuggingFace models
-# This prevents fork warnings when using FastAPI/uvicorn with HuggingFaceEmbeddings
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, FileResponse
