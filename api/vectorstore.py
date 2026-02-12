@@ -13,10 +13,11 @@ from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 
 class VectorStoreAbstract():
-    def __init__(self, abstracts: List = None, persist_directory: str = "", recreate_index: bool = True):
+    def __init__(self, abstracts: List = None, persist_directory: str = "", recreate_index: bool = True, collection_name: str = "langchain"):
         self.abstracts = abstracts
         self.persist_directory = persist_directory
         self.recreate_index = recreate_index
+        self.collection_name = collection_name
         
         # Initialize components
         self.embeddings: Optional[OpenAIEmbeddings] = None
@@ -58,6 +59,7 @@ class VectorStoreAbstract():
 
         # Initialize ChromaDB vector store
         self.vectorstore = Chroma(
+                    collection_name=self.collection_name,
                     embedding_function=self.embeddings,
                     persist_directory=self.persist_directory
                 )
@@ -65,15 +67,13 @@ class VectorStoreAbstract():
         # Delete existing collection if recreate_index=True
         if self.recreate_index and self.index_exists:
             try:
-                print(f"   Deleting existing collection...")
-                # Get all collection names and delete them
-                # ChromaDB creates collections, we need to delete and recreate
-                collection_name = self.vectorstore._collection.name
-                self.vectorstore._client.delete_collection(name=collection_name)
-                print(f"   Collection '{collection_name}' deleted successfully")
+                print(f"   Deleting collection '{self.collection_name}'...")
+                self.vectorstore._client.delete_collection(name=self.collection_name)
+                print(f"   Collection '{self.collection_name}' deleted successfully")
 
                 # Reinitialize vectorstore with empty collection
                 self.vectorstore = Chroma(
+                    collection_name=self.collection_name,
                     embedding_function=self.embeddings,
                     persist_directory=self.persist_directory
                 )
@@ -267,26 +267,28 @@ class VectorStoreAbstract():
             return None
     
     def _check_index_exists(self) -> bool:
-        """Check if a ChromaDB index already exists in the persist directory."""
+        """Check if THIS SPECIFIC collection exists in ChromaDB."""
         persist_path = Path(self.persist_directory)
-        
-        # Check for ChromaDB files
-        chroma_files = [
-            persist_path / "chroma.sqlite3",
-        ]
-        
-        # Check if any essential ChromaDB files exist
-        has_db_files = any(file.exists() for file in chroma_files)
-        
-        # Also check for collection directories (ChromaDB creates UUID-named folders)
-        has_collections = False
-        if persist_path.exists():
-            for item in persist_path.iterdir():
-                if item.is_dir() and len(item.name) == 36:  # UUID length
-                    has_collections = True
-                    break
-        
-        return has_db_files and has_collections
+
+        # Check if database file exists
+        db_path = persist_path / "chroma.sqlite3"
+        if not db_path.exists():
+            return False
+
+        # Query ChromaDB to check if THIS collection exists
+        try:
+            from chromadb import PersistentClient
+            client = PersistentClient(path=str(persist_path))
+
+            # List all collections and check if ours exists
+            collections = client.list_collections()
+            collection_names = [col.name for col in collections]
+
+            return self.collection_name in collection_names
+
+        except Exception as e:
+            # If we can't query, assume it doesn't exist
+            return False
 
     def should_process_documents(self) -> bool:
         """Determine if documents should be processed (chunked and indexed)."""

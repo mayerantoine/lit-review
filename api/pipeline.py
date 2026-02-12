@@ -43,6 +43,7 @@ class AbstractRelevance(BaseModel):
 class PipelineConfig:
     """Configuration for the literature review pipeline."""
     persist_directory: str = "./corpus-data/chroma_db"
+    collection_name: Optional[str] = None
     recreate_index: bool = False
     hybrid_k: int = 50
     num_abstracts_to_score: Optional[int] = None
@@ -211,7 +212,8 @@ def prepare_abstracts_for_indexing(
 def initialize_vector_store(
     samples_abstracts: List[Dict[str, Any]],
     persist_directory: str,
-    recreate_index: bool
+    recreate_index: bool,
+    collection_name: str = "langchain"
 ) -> Tuple[VectorStoreAbstract, Dict[str, Any]]:
     """
     Initialize the vector store.
@@ -223,7 +225,8 @@ def initialize_vector_store(
         vector_store = VectorStoreAbstract(
             abstracts=samples_abstracts,
             persist_directory=persist_directory,
-            recreate_index=recreate_index
+            recreate_index=recreate_index,
+            collection_name=collection_name
         )
 
         metadata = {
@@ -734,7 +737,8 @@ class LiteratureReviewPipeline:
         self.vector_store, _ = initialize_vector_store(
             samples_abstracts,
             self.config.persist_directory,
-            self.config.recreate_index
+            self.config.recreate_index,
+            self.config.collection_name or "langchain"
         )
 
         # Step 3: Process and index documents
@@ -806,7 +810,8 @@ class LiteratureReviewPipeline:
                 self.vector_store, _ = initialize_vector_store(
                     samples_abstracts,
                     self.config.persist_directory,
-                    recreate_index=False  # Never recreate when generating
+                    recreate_index=False,  # Never recreate when generating
+                    collection_name=self.config.collection_name or "langchain"
                 )
 
                 if not self.vector_store.index_exists:
