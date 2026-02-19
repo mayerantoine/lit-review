@@ -46,6 +46,7 @@ RUN mkdir -p /data/chromadb && chmod 777 /data/chromadb
 COPY api/index.py .
 COPY api/pipeline.py .
 COPY api/vectorstore.py .
+COPY api/config.py .
 
 # Copy the Next.js static export from builder stage
 COPY --from=frontend-builder /app/out ./static

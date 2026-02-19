@@ -7,7 +7,6 @@ This makes them reusable in different contexts (CLI, notebooks, APIs, tests).
 """
 
 import asyncio
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,18 +20,6 @@ import openai
 from agents import Agent, Runner
 
 from vectorstore import VectorStoreAbstract
-
-# Environment-aware configuration (matches api/index.py)
-DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "local")
-
-# Auto-detect ChromaDB persist directory based on environment
-if DEPLOYMENT_ENV == "azure":
-    DEFAULT_PERSIST_DIR = "/data/chromadb"
-else:
-    DEFAULT_PERSIST_DIR = "./corpus-data/chroma_db"
-
-# Allow override via environment variable
-CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
 
 
 # ============================================================================
@@ -55,7 +42,9 @@ class AbstractRelevance(BaseModel):
 @dataclass
 class PipelineConfig:
     """Configuration for the literature review pipeline."""
-    persist_directory: str = CHROMA_PERSIST_DIR
+    persist_directory: str = "./corpus-data/chroma_db"
+    collection_name: Optional[str] = None
+    storage_mode: str = "persistent"  # Options: 'persistent' | 'in_memory'
     recreate_index: bool = False
     hybrid_k: int = 50
     num_abstracts_to_score: Optional[int] = None
@@ -164,15 +153,27 @@ def load_abstracts_from_csv(csv_path: str) -> Tuple[pd.DataFrame, Dict[str, Any]
     """
     validate_csv_path(csv_path)
 
+    # File size guard (50MB max)
+    file_size_mb = Path(csv_path).stat().st_size / (1024 * 1024)
+    if file_size_mb > 50:
+        raise ValidationError(
+            f"CSV file too large ({file_size_mb:.1f}MB). Maximum allowed size is 50MB."
+        )
+
+    # Read with explicit encoding, fall back to latin-1 for academic exports
     try:
-        df = pd.read_csv(csv_path)
+        df = pd.read_csv(csv_path, encoding='utf-8')
+    except UnicodeDecodeError:
+        try:
+            df = pd.read_csv(csv_path, encoding='latin-1')
+        except Exception as e:
+            raise ValidationError(f"Failed to read CSV (encoding issue): {str(e)}")
     except Exception as e:
         raise ValidationError(f"Failed to read CSV: {str(e)}")
 
     # Validate required columns
     required_columns = ['id', 'title', 'abstract']
     missing_columns = [col for col in required_columns if col not in df.columns]
-
     if missing_columns:
         raise ValidationError(
             f"CSV missing required columns: {', '.join(missing_columns)}. "
@@ -180,10 +181,57 @@ def load_abstracts_from_csv(csv_path: str) -> Tuple[pd.DataFrame, Dict[str, Any]
             f"Found: {', '.join(df.columns)}"
         )
 
+    # Empty file check
+    if len(df) == 0:
+        raise ValidationError("CSV file contains no rows.")
+
+    # Minimum row count
+    if len(df) < 3:
+        raise ValidationError(
+            f"CSV must contain at least 3 papers. Found: {len(df)}."
+        )
+
+    # Null checks on required columns
+    null_counts = {col: int(df[col].isna().sum()) for col in required_columns}
+    cols_with_nulls = {col: count for col, count in null_counts.items() if count > 0}
+    if cols_with_nulls:
+        raise ValidationError(
+            "CSV contains missing values: "
+            + ", ".join(f"'{col}' ({n} null(s))" for col, n in cols_with_nulls.items())
+        )
+
+    # id must be numeric (coerce to int)
+    try:
+        df['id'] = pd.to_numeric(df['id'], errors='raise').astype(int)
+    except (ValueError, TypeError):
+        non_numeric = df['id'][pd.to_numeric(df['id'], errors='coerce').isna()].unique()[:5].tolist()
+        raise ValidationError(
+            f"Column 'id' must contain numeric values only. "
+            f"Found non-numeric values: {non_numeric}"
+        )
+
+    # id must be unique
+    duplicate_ids = df['id'][df['id'].duplicated()].tolist()
+    if duplicate_ids:
+        raise ValidationError(
+            f"Column 'id' contains duplicate values: {duplicate_ids[:10]}. All IDs must be unique."
+        )
+
+    # title and abstract must not be blank strings
+    for col in ['title', 'abstract']:
+        empty_mask = df[col].astype(str).str.strip() == ''
+        if empty_mask.any():
+            raise ValidationError(
+                f"Column '{col}' contains {int(empty_mask.sum())} empty string(s). "
+                "All titles and abstracts must be non-empty."
+            )
+
     metadata = {
         'count': len(df),
         'columns': list(df.columns),
-        'required_columns': required_columns
+        'required_columns': required_columns,
+        'file_size_mb': round(file_size_mb, 2),
+        'null_counts': null_counts,
     }
 
     return df, metadata
@@ -224,10 +272,19 @@ def prepare_abstracts_for_indexing(
 def initialize_vector_store(
     samples_abstracts: List[Dict[str, Any]],
     persist_directory: str,
-    recreate_index: bool
+    recreate_index: bool,
+    collection_name: str = "langchain",
+    storage_mode: str = "persistent"
 ) -> Tuple[VectorStoreAbstract, Dict[str, Any]]:
     """
     Initialize the vector store.
+
+    Args:
+        samples_abstracts: List of abstracts to index
+        persist_directory: Directory for persistent storage (ignored if storage_mode='in_memory')
+        recreate_index: Whether to recreate existing index
+        collection_name: Name of the ChromaDB collection
+        storage_mode: 'persistent' or 'in_memory'
 
     Returns:
         Tuple of (VectorStoreAbstract, metadata dict)
@@ -236,7 +293,9 @@ def initialize_vector_store(
         vector_store = VectorStoreAbstract(
             abstracts=samples_abstracts,
             persist_directory=persist_directory,
-            recreate_index=recreate_index
+            recreate_index=recreate_index,
+            collection_name=collection_name,
+            storage_mode=storage_mode
         )
 
         metadata = {
@@ -747,7 +806,9 @@ class LiteratureReviewPipeline:
         self.vector_store, _ = initialize_vector_store(
             samples_abstracts,
             self.config.persist_directory,
-            self.config.recreate_index
+            self.config.recreate_index,
+            self.config.collection_name or "langchain",
+            self.config.storage_mode
         )
 
         # Step 3: Process and index documents
@@ -812,20 +873,35 @@ class LiteratureReviewPipeline:
             ProcessingError: If vector store not initialized or abstracts not loaded
         """
         # Ensure vector store is initialized
+        # For in-memory mode, vector_store should already be set from session
+        # For persistent mode, we can load from disk if needed
+        print(f"   DEBUG: In retrieve_and_rank_papers, vector_store is: {self.vector_store}")
+        print(f"   DEBUG: vector_store is None: {self.vector_store is None}")
         if self.vector_store is None:
-            # Try to load existing index
+            # Try to load existing index (only works for persistent mode)
             try:
                 samples_abstracts = []  # Empty list since we're loading existing
                 self.vector_store, _ = initialize_vector_store(
                     samples_abstracts,
                     self.config.persist_directory,
-                    recreate_index=False  # Never recreate when generating
+                    recreate_index=False,  # Never recreate when generating
+                    collection_name=self.config.collection_name or "langchain",
+                    storage_mode=self.config.storage_mode
                 )
 
-                if not self.vector_store.index_exists:
+                # For persistent mode, verify index exists on disk
+                # For in-memory mode, index_exists is always False (expected)
+                if self.config.storage_mode == "persistent" and not self.vector_store.index_exists:
                     raise ProcessingError(
                         f"No index found at {self.config.persist_directory}. "
                         "Please run build_index() first or use the 'index' command."
+                    )
+                elif self.config.storage_mode == "in_memory" and not self.vector_store.index_exists:
+                    # For in-memory mode, vector_store should have been restored from session
+                    # If we reach here, it means the session-based restoration failed
+                    raise ProcessingError(
+                        "In-memory vector store not initialized. "
+                        "Please run build_index() first or ensure the vector store is restored from session."
                     )
             except Exception as e:
                 raise ProcessingError(
