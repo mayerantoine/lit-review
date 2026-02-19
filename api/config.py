@@ -17,16 +17,21 @@ class VectorStorageMode(str, Enum):
 class Config:
     """Application configuration from environment variables"""
 
-    # Deployment environment: "local" (default) | "azure"
-    # When set to "azure", ChromaDB defaults to /data/chromadb (Azure Files mount)
+    # Deployment environment: "local" (default) | "azure" | "aws"
+    # "azure": ChromaDB defaults to /data/chromadb (Azure Files mount)
+    # "aws": in-memory ChromaDB (App Runner has no persistent volume)
     DEPLOYMENT_ENV: str = os.getenv("DEPLOYMENT_ENV", "local")
 
     # Vector Storage Configuration
+    # AWS App Runner uses in-memory by default (no persistent volume)
     VECTOR_STORAGE_MODE = VectorStorageMode(
         os.getenv("VECTOR_STORAGE_MODE", "in_memory")
     )
 
-    # Azure-aware default: /data/chromadb on Azure, ./corpus-data/chroma_db locally
+    # Environment-aware default persist directory:
+    #   azure → /data/chromadb (Azure Files mount)
+    #   aws   → ./corpus-data/chroma_db (unused — in-memory is default on AWS)
+    #   local → ./corpus-data/chroma_db
     # Can be overridden explicitly via VECTOR_PERSIST_DIRECTORY env var
     _default_persist_dir: str = (
         "/data/chromadb" if os.getenv("DEPLOYMENT_ENV", "local") == "azure"
@@ -44,6 +49,11 @@ class Config:
     def is_azure(cls) -> bool:
         """Check if running in Azure deployment"""
         return cls.DEPLOYMENT_ENV == "azure"
+
+    @classmethod
+    def is_aws(cls) -> bool:
+        """Check if running in AWS deployment (App Runner)"""
+        return cls.DEPLOYMENT_ENV == "aws"
 
     @classmethod
     def is_persistent_storage(cls) -> bool:

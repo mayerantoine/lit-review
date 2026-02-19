@@ -14,7 +14,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Create the final Python container
-# FROM python:3.12-slim
+# AWS App Runner: single container on port 8000, in-memory ChromaDB (no persistent volume)
 FROM python:3.12-slim
 
 # Copy uv from the official image
@@ -38,9 +38,6 @@ RUN uv sync --frozen --no-cache
 
 # Install curl for health checks
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-
-# Create directory for Azure Files mount (ChromaDB persistence)
-RUN mkdir -p /data/chromadb && chmod 777 /data/chromadb
 
 # Copy the FastAPI server
 COPY api/index.py .
