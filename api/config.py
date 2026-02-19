@@ -23,7 +23,7 @@ class Config:
 
     # Vector Storage Configuration
     VECTOR_STORAGE_MODE = VectorStorageMode(
-        os.getenv("VECTOR_STORAGE_MODE", "persistent")
+        os.getenv("VECTOR_STORAGE_MODE", "in_memory")
     )
 
     # Azure-aware default: /data/chromadb on Azure, ./corpus-data/chroma_db locally
