@@ -39,16 +39,11 @@ RUN uv sync --frozen --no-cache
 # Install curl for health checks
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Pre-download HuggingFace model to avoid runtime downloads (all-MiniLM-L6-v2 ~80MB)
-# This model is used in vectorstore.py for embeddings
-# Set longer timeout and use HuggingFaceEmbeddings directly (matches actual usage)
-ENV HF_HUB_DISABLE_TELEMETRY=1
-RUN python -c "from langchain_huggingface import HuggingFaceEmbeddings; HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')" || echo "Warning: Model pre-download failed, will download at runtime"
-
 # Copy the FastAPI server
 COPY api/index.py .
 COPY api/pipeline.py .
 COPY api/vectorstore.py .
+COPY api/config.py .
 
 # Copy the Next.js static export from builder stage
 COPY --from=frontend-builder /app/out ./static

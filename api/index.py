@@ -1,9 +1,9 @@
 import os
-# Set tokenizers parallelism to false before any imports that load HuggingFace models
-# This prevents fork warnings when using FastAPI/uvicorn with HuggingFaceEmbeddings
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+import uuid
+import re
+from typing import Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +14,7 @@ import shutil
 from pathlib import Path
 from pipeline import LiteratureReviewPipeline, PipelineConfig, ValidationError, ProcessingError
 from dataclasses import asdict
+from config import config
 
 #TODO
 ### README, commit and push to github
@@ -69,29 +70,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Session middleware
+@app.middleware("http")
+async def session_middleware(request: Request, call_next):
+    """Attach session ID to all requests via cookie"""
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        session_id = str(uuid.uuid4())[:8]  # 8-char session ID
+
+    # Attach to request state
+    request.state.session_id = session_id
+
+    # Process request
+    response = await call_next(request)
+
+    # Set cookie on response (24 hour expiry)
+    response.set_cookie(
+        key="session_id",
+        value=session_id,
+        max_age=86400,  # 24 hours
+        httponly=True,
+        samesite="lax"
+    )
+
+    return response
+
+def sanitize_filename(filename: str) -> str:
+    """Convert filename to safe collection name"""
+    base = Path(filename).stem  # Remove extension
+    # Replace special chars with underscore, keep alphanumeric
+    safe = re.sub(r'[^a-zA-Z0-9_]', '_', base)
+    # Lowercase and limit length
+    return safe.lower()[:50]
+
 # Directory setup
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-# Global variables to track state
+# Session store (in-memory - upgrade to Redis/DB for production)
+SESSIONS: Dict[str, Dict[str, Any]] = {}
+# Format: {session_id: {csv_path, collection_name, timestamp}}
+
+# Global variables to track state (backward compatibility)
 LAST_CSV_PATH = None  # Track last uploaded CSV file
-TOP_RANKED_PAPERS = None  # Store ranked papers DataFrame after retrieve-and-rank
-LAST_QUERY = None  # Track which query was used for ranking
+# NOTE: TOP_RANKED_PAPERS and LAST_QUERY moved to per-session storage in SESSIONS dict
 
 @app.post("/api/upload-and-index")
-async def upload_and_index(file: UploadFile = File(...)):
+async def upload_and_index(file: UploadFile = File(...), request: Request = None):
     """
     Upload a CSV file and build the vector index for literature review.
 
     Returns:
         JSON with indexing statistics
     """
-    global LAST_CSV_PATH
+    global LAST_CSV_PATH, SESSIONS
 
+    # Get session ID
+    session_id = request.state.session_id
 
     # Validate file type
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    # Generate collection name: {session_id}_{sanitized_filename}
+    safe_filename = sanitize_filename(file.filename)
+    collection_name = f"{session_id}_{safe_filename}"
 
     # Save uploaded file
     file_path = UPLOAD_DIR / file.filename
@@ -99,14 +142,24 @@ async def upload_and_index(file: UploadFile = File(...)):
         with file_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Store the path globally for later use in generate endpoint
+        # Store session metadata
+        SESSIONS[session_id] = {
+            "csv_path": str(file_path),
+            "collection_name": collection_name,
+            "timestamp": time.time()
+        }
+        print(session_id,SESSIONS[session_id])
+
+        # Store the path globally for backward compatibility
         LAST_CSV_PATH = str(file_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
-    # Initialize pipeline with config
-    config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+    # Initialize pipeline with collection name
+    pipeline_config = PipelineConfig(
+        persist_directory=config.VECTOR_PERSIST_DIRECTORY,
+        collection_name=collection_name,
+        storage_mode=config.VECTOR_STORAGE_MODE.value,
         recreate_index=True,  # Always recreate on new upload
         hybrid_k=50,
         num_abstracts_to_score=None,
@@ -116,16 +169,26 @@ async def upload_and_index(file: UploadFile = File(...)):
         random_seed=42
     )
 
-    pipeline = LiteratureReviewPipeline(config)
+    pipeline = LiteratureReviewPipeline(pipeline_config)
 
     # Build index
     try:
         result = pipeline.build_index(str(file_path))
 
+        # For in-memory mode, store vector_store in session (it won't persist to disk)
+        if config.is_in_memory_storage():
+            SESSIONS[session_id]["vector_store"] = pipeline.vector_store
+            print(f"   DEBUG: Stored in-memory vector store in session {session_id}")
+            print(f"   DEBUG: vectorstore object: {pipeline.vector_store}")
+            print(f"   DEBUG: vectorstore type: {type(pipeline.vector_store)}")
+            print(f"   DEBUG: Session keys: {SESSIONS[session_id].keys()}")
+
         # Convert result to dict for JSON response
         response_data = {
             "success": True,
             "message": "Index created successfully",
+            "collection_name": collection_name,
+            "session_id": session_id,
             "csv_path": result.csv_path,
             "total_abstracts": result.total_abstracts,
             "chunks_created": result.chunks_created,
@@ -133,6 +196,8 @@ async def upload_and_index(file: UploadFile = File(...)):
             "persist_directory": result.persist_directory,
             "recreated": result.recreated
         }
+
+        print(session_id,response_data)
 
         return JSONResponse(content=response_data)
 
@@ -144,7 +209,7 @@ async def upload_and_index(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.post("/api/retrieve-and-rank")
-def retrieve_and_rank(request: ResearchIdeaRequest):
+def retrieve_and_rank(request: ResearchIdeaRequest, http_request: Request = None):
     """
     Retrieve and rank papers for a given research idea (Steps 4-6 of pipeline).
 
@@ -154,32 +219,41 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
     Returns:
         JSON with top-k papers, retrieval stats, and scoring stats
     """
-    global LAST_CSV_PATH, TOP_RANKED_PAPERS, LAST_QUERY
+    global LAST_CSV_PATH, SESSIONS
 
-    # Get the research idea from request
-    query = request.research_idea.strip()
+    # Get session ID
+    session_id = http_request.state.session_id
 
-    # Check if vector index exists
-    index_db_path = Path("./corpus-data/chroma_db/chroma.sqlite3")
-    if not index_db_path.exists():
+    # Check if session has uploaded data
+    if session_id not in SESSIONS:
         raise HTTPException(
             status_code=400,
-            detail="No index found. Please upload and index a CSV file first using the 'Upload & Index File' button."
+            detail="No active session. Please upload a CSV file first using 'Upload & Index File'."
         )
 
-    # Check if we have CSV path
-    if LAST_CSV_PATH is None or not Path(LAST_CSV_PATH).exists():
+    # Get session data
+    session_data = SESSIONS[session_id]
+    collection_name = session_data["collection_name"]
+    csv_path = session_data["csv_path"]
+
+    # Validate CSV still exists
+    if not Path(csv_path).exists():
         raise HTTPException(
             status_code=400,
             detail="CSV file not found. Please upload the file again."
         )
 
+    # Get the research idea from request
+    query = request.research_idea.strip()
+
     # Validate and clamp hybrid_k to valid range
     hybrid_k_value = min(max(request.hybrid_k or 50, 1), 200)
 
-    # Initialize pipeline with same config as indexing
-    config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+    # Initialize pipeline with session's collection
+    pipeline_config = PipelineConfig(
+        persist_directory=config.VECTOR_PERSIST_DIRECTORY,
+        collection_name=collection_name,
+        storage_mode=config.VECTOR_STORAGE_MODE.value,
         recreate_index=False,  # Use existing index
         hybrid_k=hybrid_k_value,
         num_abstracts_to_score=None,
@@ -190,18 +264,37 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
     )
 
     try:
-        pipeline = LiteratureReviewPipeline(config)
+        pipeline = LiteratureReviewPipeline(pipeline_config)
 
-        # Load abstracts from the uploaded CSV
-        pipeline.load_abstracts_only(LAST_CSV_PATH)
+        print(f"   DEBUG: Pipeline created, vector_store is: {pipeline.vector_store}")
+
+        # For in-memory mode, restore vector_store from session
+        if config.is_in_memory_storage():
+            print(f"   DEBUG: In-memory mode detected")
+            print(f"   DEBUG: Session keys available: {SESSIONS.get(session_id, {}).keys()}")
+            if "vector_store" in SESSIONS[session_id]:
+                stored_vs = SESSIONS[session_id]["vector_store"]
+                print(f"   DEBUG: Found vector_store in session: {stored_vs}")
+                print(f"   DEBUG: Type: {type(stored_vs)}")
+                pipeline.vector_store = stored_vs
+                print(f"   DEBUG: Restored in-memory vector store from session {session_id}")
+                print(f"   DEBUG: After restoration, pipeline.vector_store is: {pipeline.vector_store}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="In-memory vector store not found in session. Please upload and index a file first."
+                )
+
+        # Load abstracts from the session's CSV
+        pipeline.load_abstracts_only(csv_path)
 
         # Retrieve and rank papers (Steps 4-6)
         top_k_abstracts, all_scored_papers, retrieval_stats, scoring_stats = pipeline.retrieve_and_rank_papers(query)
 
-        # Store results globally for use in /api/generate
+        # Store results in session for use in /api/generate
         # Store ALL scored papers so users can select from any of them
-        TOP_RANKED_PAPERS = all_scored_papers
-        LAST_QUERY = query
+        SESSIONS[session_id]["ranked_papers"] = all_scored_papers
+        SESSIONS[session_id]["last_query"] = query
 
         # Convert top-k DataFrame to list of dicts for JSON response
         top_papers_list = []
@@ -255,46 +348,65 @@ def retrieve_and_rank(request: ResearchIdeaRequest):
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.post("/api/generate")
-def lit_review(request: ResearchIdeaRequest):
+def lit_review(request: ResearchIdeaRequest, http_request: Request = None):
     """
     Generate related work section using pre-ranked papers (streaming).
 
     Requires that /api/retrieve-and-rank has been called first to rank papers.
     This endpoint only performs Step 7 (text generation) using the pre-ranked papers.
     """
-    global TOP_RANKED_PAPERS, LAST_QUERY
+    global SESSIONS
+
+    # Get session ID
+    session_id = http_request.state.session_id
+
+    # Verify session exists
+    if session_id not in SESSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="No active session. Please upload and rank papers first."
+        )
 
     # Get the research idea from request
     query = request.research_idea.strip()
 
-    # Check if retrieve-and-rank has been called
-    if TOP_RANKED_PAPERS is None:
+    # Check if retrieve-and-rank has been called for THIS session
+    if "ranked_papers" not in SESSIONS[session_id]:
         raise HTTPException(
             status_code=400,
             detail="No ranked papers found. Please call /api/retrieve-and-rank first to rank papers."
         )
 
+    # Get session-specific ranked papers and query
+    ranked_papers = SESSIONS[session_id]["ranked_papers"]
+    last_query = SESSIONS[session_id]["last_query"]
+
     # Verify query matches the one used for ranking
-    if LAST_QUERY != query:
+    if last_query != query:
         raise HTTPException(
             status_code=400,
             detail=f"Query mismatch. Ranked papers were retrieved for a different query. Please call /api/retrieve-and-rank again with the current query."
         )
 
     # Filter papers based on selected_paper_ids if provided
-    papers_to_use = TOP_RANKED_PAPERS
+    papers_to_use = ranked_papers
     if request.selected_paper_ids is not None and len(request.selected_paper_ids) > 0:
         # Filter to only include selected papers
-        papers_to_use = TOP_RANKED_PAPERS[TOP_RANKED_PAPERS['id'].isin(request.selected_paper_ids)]
+        papers_to_use = ranked_papers[ranked_papers['id'].isin(request.selected_paper_ids)]
         if len(papers_to_use) == 0:
             raise HTTPException(
                 status_code=400,
                 detail="None of the selected paper IDs were found in the ranked papers."
             )
 
+    # Get session's collection name (for consistency)
+    collection_name = SESSIONS[session_id]["collection_name"]
+
     # Initialize pipeline config for generation
-    config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+    pipeline_config = PipelineConfig(
+        persist_directory=config.VECTOR_PERSIST_DIRECTORY,
+        collection_name=collection_name,
+        storage_mode=config.VECTOR_STORAGE_MODE.value,
         recreate_index=False,
         hybrid_k=50,
         num_abstracts_to_score=None,
@@ -312,7 +424,7 @@ def lit_review(request: ResearchIdeaRequest):
         streaming_response = generate_related_work_text(
             query,
             papers_to_use,
-            config.generation_model,
+            pipeline_config.generation_model,
             stream=True
         )
 
@@ -325,6 +437,73 @@ def lit_review(request: ResearchIdeaRequest):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+@app.get("/api/collections")
+async def list_collections(request: Request):
+    """List all collections for current session"""
+    session_id = request.state.session_id
+
+    try:
+        from chromadb import PersistentClient
+        client = PersistentClient(path="./corpus-data/chroma_db")
+        all_collections = client.list_collections()
+
+        print("collections:",all_collections)
+
+        # Filter to this session's collections
+        user_collections = []
+        for col in all_collections:
+            if col.name.startswith(f"{session_id}_"):
+                user_collections.append({
+                    "name": col.name,
+                    "count": col.count(),
+                    "metadata": col.metadata
+                })
+
+        return {
+            "session_id": session_id,
+            "collections": user_collections,
+            "total": len(user_collections)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list collections: {str(e)}")
+
+@app.delete("/api/collections/{collection_name}")
+async def delete_collection(collection_name: str, request: Request):
+    """Delete a specific collection (user must own it)"""
+    global SESSIONS
+
+    session_id = request.state.session_id
+
+    # Verify ownership: collection must start with user's session_id
+    if not collection_name.startswith(f"{session_id}_"):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: You can only delete your own collections"
+        )
+
+    try:
+        from chromadb import PersistentClient
+        client = PersistentClient(path="./corpus-data/chroma_db")
+
+        # Delete collection from ChromaDB
+        client.delete_collection(name=collection_name)
+
+        # Clean up session store if this was the active collection
+        if session_id in SESSIONS and SESSIONS[session_id]["collection_name"] == collection_name:
+            del SESSIONS[session_id]
+
+        return {
+            "success": True,
+            "message": f"Collection '{collection_name}' deleted successfully"
+        }
+
+    except ValueError as e:
+        # Collection doesn't exist
+        raise HTTPException(status_code=404, detail=f"Collection not found: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete collection: {str(e)}")
 
 @app.get("/health")
 def health_check():
