@@ -20,7 +20,7 @@ class Config:
     # Deployment environment: "local" (default) | "azure" | "aws"
     # "azure": ChromaDB defaults to /data/chromadb (Azure Files mount)
     # "aws": in-memory ChromaDB (App Runner has no persistent volume)
-    DEPLOYMENT_ENV: str = os.getenv("DEPLOYMENT_ENV", "local")
+    DEPLOYMENT_ENV: str = os.getenv("DEPLOYMENT_ENV", "aws")
 
     # Vector Storage Configuration
     # AWS App Runner uses in-memory by default (no persistent volume)
