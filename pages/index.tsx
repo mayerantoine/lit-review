@@ -407,8 +407,52 @@ export default function Home() {
                 Generate Related Work
               </h2>
               <p className="mt-2 text-black/60 dark:text-white/60">
-                Start by providing your research idea and a list of references.
+                Automatically generate a Related Work section with inline citations from your paper corpus.
               </p>
+            </div>
+
+            {/* App Info Panel */}
+            <div className="rounded-xl border border-black/10 dark:border-white/10 bg-black/2 dark:bg-white/3 p-5 space-y-4 text-sm">
+              {/* Steps */}
+              <div>
+                <p className="font-semibold text-black dark:text-white mb-2">How it works</p>
+                <ol className="space-y-1 text-black/70 dark:text-white/70">
+                  <li className="flex items-start gap-2">
+                    <span className="font-mono text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded mt-0.5 flex-shrink-0">1</span>
+                    <span><span className="font-medium text-black dark:text-white">Upload &amp; Index</span> — Upload a CSV of papers; they are embedded and indexed for search.</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="font-mono text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded mt-0.5 flex-shrink-0">2</span>
+                    <span><span className="font-medium text-black dark:text-white">Retrieve &amp; Rank</span> — Enter your research idea; relevant papers are retrieved and AI-scored for relevance.</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="font-mono text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded mt-0.5 flex-shrink-0">3</span>
+                    <span><span className="font-medium text-black dark:text-white">Generate</span> — Select papers and generate a cohesive Related Work section with <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 rounded">[id]</code> citations.</span>
+                  </li>
+                </ol>
+              </div>
+
+              {/* CSV format */}
+              <div className="border-t border-black/8 dark:border-white/8 pt-4">
+                <p className="font-semibold text-black dark:text-white mb-1">CSV format required</p>
+                <p className="text-black/60 dark:text-white/60">
+                  Your file must have these columns:{' '}
+                  <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">id</code>{' '}
+                  <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">title</code>{' '}
+                  <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">abstract</code>.
+                  IDs must be unique integers. Max file size: 50 MB.
+                </p>
+              </div>
+
+              {/* Limitations */}
+              <div className="border-t border-black/8 dark:border-white/8 pt-4">
+                <p className="font-semibold text-black dark:text-white mb-1">Limitations</p>
+                <ul className="space-y-1 text-black/60 dark:text-white/60 list-disc list-inside">
+                  <li>Works only from the abstracts you provide — no internet search.</li>
+                  <li>Quality depends on the breadth and relevance of your uploaded corpus.</li>
+                  <li>Session data is in-memory and lost on server restart.</li>
+                </ul>
+              </div>
             </div>
 
             {/* Form */}

@@ -153,15 +153,27 @@ def load_abstracts_from_csv(csv_path: str) -> Tuple[pd.DataFrame, Dict[str, Any]
     """
     validate_csv_path(csv_path)
 
+    # File size guard (50MB max)
+    file_size_mb = Path(csv_path).stat().st_size / (1024 * 1024)
+    if file_size_mb > 50:
+        raise ValidationError(
+            f"CSV file too large ({file_size_mb:.1f}MB). Maximum allowed size is 50MB."
+        )
+
+    # Read with explicit encoding, fall back to latin-1 for academic exports
     try:
-        df = pd.read_csv(csv_path)
+        df = pd.read_csv(csv_path, encoding='utf-8')
+    except UnicodeDecodeError:
+        try:
+            df = pd.read_csv(csv_path, encoding='latin-1')
+        except Exception as e:
+            raise ValidationError(f"Failed to read CSV (encoding issue): {str(e)}")
     except Exception as e:
         raise ValidationError(f"Failed to read CSV: {str(e)}")
 
     # Validate required columns
     required_columns = ['id', 'title', 'abstract']
     missing_columns = [col for col in required_columns if col not in df.columns]
-
     if missing_columns:
         raise ValidationError(
             f"CSV missing required columns: {', '.join(missing_columns)}. "
@@ -169,10 +181,57 @@ def load_abstracts_from_csv(csv_path: str) -> Tuple[pd.DataFrame, Dict[str, Any]
             f"Found: {', '.join(df.columns)}"
         )
 
+    # Empty file check
+    if len(df) == 0:
+        raise ValidationError("CSV file contains no rows.")
+
+    # Minimum row count
+    if len(df) < 3:
+        raise ValidationError(
+            f"CSV must contain at least 3 papers. Found: {len(df)}."
+        )
+
+    # Null checks on required columns
+    null_counts = {col: int(df[col].isna().sum()) for col in required_columns}
+    cols_with_nulls = {col: count for col, count in null_counts.items() if count > 0}
+    if cols_with_nulls:
+        raise ValidationError(
+            "CSV contains missing values: "
+            + ", ".join(f"'{col}' ({n} null(s))" for col, n in cols_with_nulls.items())
+        )
+
+    # id must be numeric (coerce to int)
+    try:
+        df['id'] = pd.to_numeric(df['id'], errors='raise').astype(int)
+    except (ValueError, TypeError):
+        non_numeric = df['id'][pd.to_numeric(df['id'], errors='coerce').isna()].unique()[:5].tolist()
+        raise ValidationError(
+            f"Column 'id' must contain numeric values only. "
+            f"Found non-numeric values: {non_numeric}"
+        )
+
+    # id must be unique
+    duplicate_ids = df['id'][df['id'].duplicated()].tolist()
+    if duplicate_ids:
+        raise ValidationError(
+            f"Column 'id' contains duplicate values: {duplicate_ids[:10]}. All IDs must be unique."
+        )
+
+    # title and abstract must not be blank strings
+    for col in ['title', 'abstract']:
+        empty_mask = df[col].astype(str).str.strip() == ''
+        if empty_mask.any():
+            raise ValidationError(
+                f"Column '{col}' contains {int(empty_mask.sum())} empty string(s). "
+                "All titles and abstracts must be non-empty."
+            )
+
     metadata = {
         'count': len(df),
         'columns': list(df.columns),
-        'required_columns': required_columns
+        'required_columns': required_columns,
+        'file_size_mb': round(file_size_mb, 2),
+        'null_counts': null_counts,
     }
 
     return df, metadata

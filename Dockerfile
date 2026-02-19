@@ -43,6 +43,7 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 COPY api/index.py .
 COPY api/pipeline.py .
 COPY api/vectorstore.py .
+COPY api/config.py .
 
 # Copy the Next.js static export from builder stage
 COPY --from=frontend-builder /app/out ./static
