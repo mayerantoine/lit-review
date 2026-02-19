@@ -14,6 +14,7 @@ import shutil
 from pathlib import Path
 from pipeline import LiteratureReviewPipeline, PipelineConfig, ValidationError, ProcessingError
 from dataclasses import asdict
+from config import config
 
 #TODO
 ### README, commit and push to github
@@ -155,9 +156,10 @@ async def upload_and_index(file: UploadFile = File(...), request: Request = None
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
     # Initialize pipeline with collection name
-    config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+    pipeline_config = PipelineConfig(
+        persist_directory=config.VECTOR_PERSIST_DIRECTORY,
         collection_name=collection_name,
+        storage_mode=config.VECTOR_STORAGE_MODE.value,
         recreate_index=True,  # Always recreate on new upload
         hybrid_k=50,
         num_abstracts_to_score=None,
@@ -167,11 +169,19 @@ async def upload_and_index(file: UploadFile = File(...), request: Request = None
         random_seed=42
     )
 
-    pipeline = LiteratureReviewPipeline(config)
+    pipeline = LiteratureReviewPipeline(pipeline_config)
 
     # Build index
     try:
         result = pipeline.build_index(str(file_path))
+
+        # For in-memory mode, store vector_store in session (it won't persist to disk)
+        if config.is_in_memory_storage():
+            SESSIONS[session_id]["vector_store"] = pipeline.vector_store
+            print(f"   DEBUG: Stored in-memory vector store in session {session_id}")
+            print(f"   DEBUG: vectorstore object: {pipeline.vector_store}")
+            print(f"   DEBUG: vectorstore type: {type(pipeline.vector_store)}")
+            print(f"   DEBUG: Session keys: {SESSIONS[session_id].keys()}")
 
         # Convert result to dict for JSON response
         response_data = {
@@ -240,9 +250,10 @@ def retrieve_and_rank(request: ResearchIdeaRequest, http_request: Request = None
     hybrid_k_value = min(max(request.hybrid_k or 50, 1), 200)
 
     # Initialize pipeline with session's collection
-    config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+    pipeline_config = PipelineConfig(
+        persist_directory=config.VECTOR_PERSIST_DIRECTORY,
         collection_name=collection_name,
+        storage_mode=config.VECTOR_STORAGE_MODE.value,
         recreate_index=False,  # Use existing index
         hybrid_k=hybrid_k_value,
         num_abstracts_to_score=None,
@@ -253,7 +264,26 @@ def retrieve_and_rank(request: ResearchIdeaRequest, http_request: Request = None
     )
 
     try:
-        pipeline = LiteratureReviewPipeline(config)
+        pipeline = LiteratureReviewPipeline(pipeline_config)
+
+        print(f"   DEBUG: Pipeline created, vector_store is: {pipeline.vector_store}")
+
+        # For in-memory mode, restore vector_store from session
+        if config.is_in_memory_storage():
+            print(f"   DEBUG: In-memory mode detected")
+            print(f"   DEBUG: Session keys available: {SESSIONS.get(session_id, {}).keys()}")
+            if "vector_store" in SESSIONS[session_id]:
+                stored_vs = SESSIONS[session_id]["vector_store"]
+                print(f"   DEBUG: Found vector_store in session: {stored_vs}")
+                print(f"   DEBUG: Type: {type(stored_vs)}")
+                pipeline.vector_store = stored_vs
+                print(f"   DEBUG: Restored in-memory vector store from session {session_id}")
+                print(f"   DEBUG: After restoration, pipeline.vector_store is: {pipeline.vector_store}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="In-memory vector store not found in session. Please upload and index a file first."
+                )
 
         # Load abstracts from the session's CSV
         pipeline.load_abstracts_only(csv_path)
@@ -373,9 +403,10 @@ def lit_review(request: ResearchIdeaRequest, http_request: Request = None):
     collection_name = SESSIONS[session_id]["collection_name"]
 
     # Initialize pipeline config for generation
-    config = PipelineConfig(
-        persist_directory="./corpus-data/chroma_db",
+    pipeline_config = PipelineConfig(
+        persist_directory=config.VECTOR_PERSIST_DIRECTORY,
         collection_name=collection_name,
+        storage_mode=config.VECTOR_STORAGE_MODE.value,
         recreate_index=False,
         hybrid_k=50,
         num_abstracts_to_score=None,
@@ -393,7 +424,7 @@ def lit_review(request: ResearchIdeaRequest, http_request: Request = None):
         streaming_response = generate_related_work_text(
             query,
             papers_to_use,
-            config.generation_model,
+            pipeline_config.generation_model,
             stream=True
         )
 

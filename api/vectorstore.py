@@ -13,12 +13,13 @@ from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 
 class VectorStoreAbstract():
-    def __init__(self, abstracts: List = None, persist_directory: str = "", recreate_index: bool = True, collection_name: str = "langchain"):
+    def __init__(self, abstracts: List = None, persist_directory: str = "", recreate_index: bool = True, collection_name: str = "langchain", storage_mode: str = "persistent"):
         self.abstracts = abstracts
         self.persist_directory = persist_directory
         self.recreate_index = recreate_index
         self.collection_name = collection_name
-        
+        self.storage_mode = storage_mode
+
         # Initialize components
         self.embeddings: Optional[OpenAIEmbeddings] = None
         self.vectorstore: Optional[Chroma] = None
@@ -30,42 +31,56 @@ class VectorStoreAbstract():
         self.initialize_store()
     
     def initialize_store(self):
-        persist_path = Path(self.persist_directory)
-        persist_path.mkdir(parents=True, exist_ok=True)
+        # Only create persist directory if using persistent storage
+        if self.storage_mode == "persistent":
+            persist_path = Path(self.persist_directory)
+            persist_path.mkdir(parents=True, exist_ok=True)
 
-        # Check if index already exists
-        self.index_exists = self._check_index_exists()
+            # Check if index already exists
+            self.index_exists = self._check_index_exists()
 
-        if not self.recreate_index and self.index_exists:
-            print(f"Using existing index at {self.persist_directory}")
-            print(f"   Set recreate_index=True to force recreation")
-        else:
-            if self.index_exists and self.recreate_index:
-                print(f"Recreating existing index at {self.persist_directory}")
+            if not self.recreate_index and self.index_exists:
+                print(f"Using existing index at {self.persist_directory}")
+                print(f"   Set recreate_index=True to force recreation")
             else:
-                print(f"Creating new index at {self.persist_directory}")
+                if self.index_exists and self.recreate_index:
+                    print(f"Recreating existing index at {self.persist_directory}")
+                else:
+                    print(f"Creating new index at {self.persist_directory}")
+        else:
+            # In-memory mode
+            self.index_exists = False
+            print(f"Creating in-memory vector store (collection: {self.collection_name})")
 
-
+        # Text splitter (same for both modes)
         self.text_splitter = RecursiveCharacterTextSplitter(
                         chunk_size=150,
                         chunk_overlap=20,
                         length_function=len,
                         separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""])
 
+        # Embeddings (same for both modes)
         self.embeddings = OpenAIEmbeddings(
             model="text-embedding-3-small"
         )
 
-
         # Initialize ChromaDB vector store
-        self.vectorstore = Chroma(
-                    collection_name=self.collection_name,
-                    embedding_function=self.embeddings,
-                    persist_directory=self.persist_directory
-                )
+        if self.storage_mode == "persistent":
+            # Persistent storage
+            self.vectorstore = Chroma(
+                        collection_name=self.collection_name,
+                        embedding_function=self.embeddings,
+                        persist_directory=self.persist_directory
+                    )
+        else:
+            # In-memory storage (no persist_directory parameter)
+            self.vectorstore = Chroma(
+                        collection_name=self.collection_name,
+                        embedding_function=self.embeddings
+                    )
 
-        # Delete existing collection if recreate_index=True
-        if self.recreate_index and self.index_exists:
+        # Delete existing collection if recreate_index=True (persistent only)
+        if self.storage_mode == "persistent" and self.recreate_index and self.index_exists:
             try:
                 print(f"   Deleting collection '{self.collection_name}'...")
                 self.vectorstore._client.delete_collection(name=self.collection_name)
@@ -228,7 +243,13 @@ class VectorStoreAbstract():
             self.hybrid_retriever = self.create_hybrid_retriever(documents=self._cached_documents)
             return
 
-        # Otherwise, need to load documents from vectorstore
+        # For in-memory mode: must have cached documents, cannot reload from disk
+        if self.storage_mode == "in_memory":
+            print("Warning: In-memory mode requires cached documents for hybrid retrieval")
+            print("Hybrid retriever not available")
+            return
+
+        # For persistent mode: load from vectorstore
         # Get all documents from vectorstore
         if self.vectorstore and self.index_exists:
             print("Loading documents from existing index for hybrid retrieval...")
@@ -268,6 +289,11 @@ class VectorStoreAbstract():
     
     def _check_index_exists(self) -> bool:
         """Check if THIS SPECIFIC collection exists in ChromaDB."""
+        # In-memory mode: always return False (no persistence)
+        if self.storage_mode == "in_memory":
+            return False
+
+        # Persistent mode: check disk
         persist_path = Path(self.persist_directory)
 
         # Check if database file exists

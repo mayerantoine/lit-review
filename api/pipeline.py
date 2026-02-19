@@ -44,6 +44,7 @@ class PipelineConfig:
     """Configuration for the literature review pipeline."""
     persist_directory: str = "./corpus-data/chroma_db"
     collection_name: Optional[str] = None
+    storage_mode: str = "persistent"  # Options: 'persistent' | 'in_memory'
     recreate_index: bool = False
     hybrid_k: int = 50
     num_abstracts_to_score: Optional[int] = None
@@ -213,10 +214,18 @@ def initialize_vector_store(
     samples_abstracts: List[Dict[str, Any]],
     persist_directory: str,
     recreate_index: bool,
-    collection_name: str = "langchain"
+    collection_name: str = "langchain",
+    storage_mode: str = "persistent"
 ) -> Tuple[VectorStoreAbstract, Dict[str, Any]]:
     """
     Initialize the vector store.
+
+    Args:
+        samples_abstracts: List of abstracts to index
+        persist_directory: Directory for persistent storage (ignored if storage_mode='in_memory')
+        recreate_index: Whether to recreate existing index
+        collection_name: Name of the ChromaDB collection
+        storage_mode: 'persistent' or 'in_memory'
 
     Returns:
         Tuple of (VectorStoreAbstract, metadata dict)
@@ -226,7 +235,8 @@ def initialize_vector_store(
             abstracts=samples_abstracts,
             persist_directory=persist_directory,
             recreate_index=recreate_index,
-            collection_name=collection_name
+            collection_name=collection_name,
+            storage_mode=storage_mode
         )
 
         metadata = {
@@ -738,7 +748,8 @@ class LiteratureReviewPipeline:
             samples_abstracts,
             self.config.persist_directory,
             self.config.recreate_index,
-            self.config.collection_name or "langchain"
+            self.config.collection_name or "langchain",
+            self.config.storage_mode
         )
 
         # Step 3: Process and index documents
@@ -803,21 +814,35 @@ class LiteratureReviewPipeline:
             ProcessingError: If vector store not initialized or abstracts not loaded
         """
         # Ensure vector store is initialized
+        # For in-memory mode, vector_store should already be set from session
+        # For persistent mode, we can load from disk if needed
+        print(f"   DEBUG: In retrieve_and_rank_papers, vector_store is: {self.vector_store}")
+        print(f"   DEBUG: vector_store is None: {self.vector_store is None}")
         if self.vector_store is None:
-            # Try to load existing index
+            # Try to load existing index (only works for persistent mode)
             try:
                 samples_abstracts = []  # Empty list since we're loading existing
                 self.vector_store, _ = initialize_vector_store(
                     samples_abstracts,
                     self.config.persist_directory,
                     recreate_index=False,  # Never recreate when generating
-                    collection_name=self.config.collection_name or "langchain"
+                    collection_name=self.config.collection_name or "langchain",
+                    storage_mode=self.config.storage_mode
                 )
 
-                if not self.vector_store.index_exists:
+                # For persistent mode, verify index exists on disk
+                # For in-memory mode, index_exists is always False (expected)
+                if self.config.storage_mode == "persistent" and not self.vector_store.index_exists:
                     raise ProcessingError(
                         f"No index found at {self.config.persist_directory}. "
                         "Please run build_index() first or use the 'index' command."
+                    )
+                elif self.config.storage_mode == "in_memory" and not self.vector_store.index_exists:
+                    # For in-memory mode, vector_store should have been restored from session
+                    # If we reach here, it means the session-based restoration failed
+                    raise ProcessingError(
+                        "In-memory vector store not initialized. "
+                        "Please run build_index() first or ensure the vector store is restored from session."
                     )
             except Exception as e:
                 raise ProcessingError(
