@@ -14,7 +14,10 @@ import shutil
 from pathlib import Path
 from pipeline import LiteratureReviewPipeline, PipelineConfig, ValidationError, ProcessingError
 from dataclasses import asdict
-from config import config
+from config import config, get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
 
 #TODO
 ### README, commit and push to github
@@ -148,7 +151,7 @@ async def upload_and_index(file: UploadFile = File(...), request: Request = None
             "collection_name": collection_name,
             "timestamp": time.time()
         }
-        print(session_id,SESSIONS[session_id])
+        logger.info(f"Session {session_id} created with collection {collection_name}")
 
         # Store the path globally for backward compatibility
         LAST_CSV_PATH = str(file_path)
@@ -178,10 +181,7 @@ async def upload_and_index(file: UploadFile = File(...), request: Request = None
         # For in-memory mode, store vector_store in session (it won't persist to disk)
         if config.is_in_memory_storage():
             SESSIONS[session_id]["vector_store"] = pipeline.vector_store
-            print(f"   DEBUG: Stored in-memory vector store in session {session_id}")
-            print(f"   DEBUG: vectorstore object: {pipeline.vector_store}")
-            print(f"   DEBUG: vectorstore type: {type(pipeline.vector_store)}")
-            print(f"   DEBUG: Session keys: {SESSIONS[session_id].keys()}")
+            logger.debug(f"Stored in-memory vector store in session {session_id}")
 
         # Convert result to dict for JSON response
         response_data = {
@@ -197,7 +197,7 @@ async def upload_and_index(file: UploadFile = File(...), request: Request = None
             "recreated": result.recreated
         }
 
-        print(session_id,response_data)
+        logger.info(f"Index created for session {session_id}: {result.total_abstracts} abstracts, {result.total_indexed} documents indexed")
 
         return JSONResponse(content=response_data)
 
@@ -266,19 +266,13 @@ def retrieve_and_rank(request: ResearchIdeaRequest, http_request: Request = None
     try:
         pipeline = LiteratureReviewPipeline(pipeline_config)
 
-        print(f"   DEBUG: Pipeline created, vector_store is: {pipeline.vector_store}")
-
         # For in-memory mode, restore vector_store from session
         if config.is_in_memory_storage():
-            print(f"   DEBUG: In-memory mode detected")
-            print(f"   DEBUG: Session keys available: {SESSIONS.get(session_id, {}).keys()}")
+            logger.debug(f"In-memory mode detected for session {session_id}")
             if "vector_store" in SESSIONS[session_id]:
                 stored_vs = SESSIONS[session_id]["vector_store"]
-                print(f"   DEBUG: Found vector_store in session: {stored_vs}")
-                print(f"   DEBUG: Type: {type(stored_vs)}")
                 pipeline.vector_store = stored_vs
-                print(f"   DEBUG: Restored in-memory vector store from session {session_id}")
-                print(f"   DEBUG: After restoration, pipeline.vector_store is: {pipeline.vector_store}")
+                logger.debug(f"Restored in-memory vector store from session {session_id}")
             else:
                 raise HTTPException(
                     status_code=400,
@@ -448,7 +442,7 @@ async def list_collections(request: Request):
         client = PersistentClient(path="./corpus-data/chroma_db")
         all_collections = client.list_collections()
 
-        print("collections:",all_collections)
+        logger.debug(f"Retrieved collections for session {session_id}: {len(all_collections)} total")
 
         # Filter to this session's collections
         user_collections = []
