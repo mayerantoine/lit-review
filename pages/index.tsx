@@ -50,6 +50,7 @@ export default function Home() {
   const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
   const [indexError, setIndexError] = useState<string>('');
   const [isRanking, setIsRanking] = useState(false);
+  const [rankingLoadingMessage, setRankingLoadingMessage] = useState<string>('Retrieving and ranking papers...');
   const [rankedPapers, setRankedPapers] = useState<RankedPaper[] | null>(null);
   const [allScoredPapers, setAllScoredPapers] = useState<RankedPaper[] | null>(null);
   const [rankingStats, setRankingStats] = useState<{retrieval: RetrievalStats, scoring: ScoringStats} | null>(null);
@@ -176,6 +177,16 @@ export default function Home() {
     setRankedPapers(null);
     setAllScoredPapers(null);
     setRankingStats(null);
+    setRankingLoadingMessage('Retrieving and ranking papers...');
+
+    // Progressive loading messages
+    const timer1 = setTimeout(() => {
+      setRankingLoadingMessage('Still processing... This may take a moment for large datasets.');
+    }, 5000); // After 5 seconds
+
+    const timer2 = setTimeout(() => {
+      setRankingLoadingMessage('This is taking longer than expected. Please wait...');
+    }, 15000); // After 15 seconds
 
     try {
       const response = await fetch(`/api/retrieve-and-rank`, {
@@ -204,6 +215,9 @@ export default function Home() {
     } catch (error) {
       setRankingError(error instanceof Error ? error.message : 'Failed to retrieve and rank papers');
     } finally {
+      // Clear timers
+      clearTimeout(timer1);
+      clearTimeout(timer2);
       setIsRanking(false);
     }
   };
@@ -444,7 +458,7 @@ export default function Home() {
                   <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">id</code>{' '}
                   <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">title</code>{' '}
                   <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">abstract</code>.
-                  IDs must be unique integers. Max file size: 50 MB.
+                  IDs must be unique integers. Max file size: 50 MB. Max papers: 300.
                 </p>
               </div>
 
@@ -673,7 +687,7 @@ export default function Home() {
                 {isRanking && (
                   <div className="flex items-center justify-center gap-3 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
                     <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
-                    <span className="text-sm font-medium text-primary">Retrieving and ranking papers...</span>
+                    <span className="text-sm font-medium text-primary">{rankingLoadingMessage}</span>
                   </div>
                 )}
 

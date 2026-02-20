@@ -62,5 +62,5 @@ HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
 # Expose port 8000 (FastAPI will serve everything)
 EXPOSE 8000
 
-# Start the FastAPI server
-CMD ["uvicorn", "index:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start the FastAPI server with 2 workers for better concurrency
+CMD ["uvicorn", "index:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

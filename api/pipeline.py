@@ -195,6 +195,12 @@ def load_abstracts_from_csv(csv_path: str) -> Tuple[pd.DataFrame, Dict[str, Any]
             f"CSV must contain at least 3 papers. Found: {len(df)}."
         )
 
+    # Maximum row count (MVP limit)
+    if len(df) > 300:
+        raise ValidationError(
+            f"CSV contains too many papers ({len(df)}). Maximum allowed for MVP is 300 papers."
+        )
+
     # Null checks on required columns
     null_counts = {col: int(df[col].isna().sum()) for col in required_columns}
     cols_with_nulls = {col: count for col, count in null_counts.items() if count > 0}
