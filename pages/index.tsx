@@ -156,6 +156,10 @@ export default function Home() {
     setAllScoredPapers(null);
     setRankingStats(null);
     setRankingError('');
+    setSelectedPapersForGeneration([]);
+    setGeneratedText('');
+    setCitations([]);
+    setGenerateError('');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }

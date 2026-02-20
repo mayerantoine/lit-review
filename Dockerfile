@@ -14,7 +14,10 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Create the final Python container
-# FROM python:3.12-slim
+# Deployment targets:
+#   - AWS App Runner: in-memory vector store (no persistent volumes)
+#   - Azure App Service: in-memory by default, optional persistent mode with Azure Files
+#   - Local: in-memory by default, optional persistent mode with local disk
 FROM python:3.12-slim
 
 # Copy uv from the official image
@@ -38,6 +41,10 @@ RUN uv sync --frozen --no-cache
 
 # Install curl for health checks
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Create directory for optional Azure Files mount (used only if VECTOR_STORAGE_MODE=persistent)
+# Azure Files mount point: /data/chromadb
+RUN mkdir -p /data/chromadb && chmod 777 /data/chromadb
 
 # Copy the FastAPI server
 COPY api/index.py .

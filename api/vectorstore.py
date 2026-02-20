@@ -11,6 +11,10 @@ from langchain_openai import OpenAIEmbeddings
 #from langchain.retrievers import EnsembleRetriever
 from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
+from config import get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
 
 class VectorStoreAbstract():
     def __init__(self, abstracts: List = None, persist_directory: str = "", recreate_index: bool = True, collection_name: str = "langchain", storage_mode: str = "persistent"):
@@ -40,17 +44,16 @@ class VectorStoreAbstract():
             self.index_exists = self._check_index_exists()
 
             if not self.recreate_index and self.index_exists:
-                print(f"Using existing index at {self.persist_directory}")
-                print(f"   Set recreate_index=True to force recreation")
+                logger.info(f"Using existing index at {self.persist_directory}")
             else:
                 if self.index_exists and self.recreate_index:
-                    print(f"Recreating existing index at {self.persist_directory}")
+                    logger.info(f"Recreating existing index at {self.persist_directory}")
                 else:
-                    print(f"Creating new index at {self.persist_directory}")
+                    logger.info(f"Creating new index at {self.persist_directory}")
         else:
             # In-memory mode
             self.index_exists = False
-            print(f"Creating in-memory vector store (collection: {self.collection_name})")
+            logger.info(f"Creating in-memory vector store (collection: {self.collection_name})")
 
         # Text splitter (same for both modes)
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -82,9 +85,9 @@ class VectorStoreAbstract():
         # Delete existing collection if recreate_index=True (persistent only)
         if self.storage_mode == "persistent" and self.recreate_index and self.index_exists:
             try:
-                print(f"   Deleting collection '{self.collection_name}'...")
+                logger.info(f"Deleting collection '{self.collection_name}'...")
                 self.vectorstore._client.delete_collection(name=self.collection_name)
-                print(f"   Collection '{self.collection_name}' deleted successfully")
+                logger.info(f"Collection '{self.collection_name}' deleted successfully")
 
                 # Reinitialize vectorstore with empty collection
                 self.vectorstore = Chroma(
@@ -92,10 +95,10 @@ class VectorStoreAbstract():
                     embedding_function=self.embeddings,
                     persist_directory=self.persist_directory
                 )
-                print(f"   New empty collection created")
+                logger.info("New empty collection created")
             except Exception as e:
-                print(f"   Warning: Could not delete existing collection: {e}")
-                print(f"   Continuing with existing collection...")
+                logger.warning(f"Could not delete existing collection: {e}")
+                logger.info("Continuing with existing collection")
     
     def create_hybrid_retriever(self,documents, weights=[0.5, 0.5], k=20):
         """
@@ -133,7 +136,7 @@ class VectorStoreAbstract():
             progress_bar = tqdm(total=total_articles, desc="Chunking documents", unit="article")
         except ImportError:
             progress_bar = None
-            print("Processing articles (this may take several minutes)...")
+            logger.info("Processing articles (this may take several minutes)...")
 
         try:
             for content in self.abstracts:
@@ -167,7 +170,7 @@ class VectorStoreAbstract():
             progress_bar = tqdm(total=total_docs, desc="Creating embeddings", unit="doc")
         except ImportError:
             progress_bar = None
-            print("   Processing in batches (this may take several minutes)...")
+            logger.info("Processing in batches (this may take several minutes)...")
 
         try:
             # Process documents in batches
@@ -184,7 +187,7 @@ class VectorStoreAbstract():
                 if progress_bar:
                     progress_bar.update(len(batch))
                 else:
-                    print(f"   Processed {processed_count}/{total_docs} documents")
+                    logger.info(f"Processed {processed_count}/{total_docs} documents")
         finally:
             if progress_bar:
                 progress_bar.close()
@@ -245,14 +248,13 @@ class VectorStoreAbstract():
 
         # For in-memory mode: must have cached documents, cannot reload from disk
         if self.storage_mode == "in_memory":
-            print("Warning: In-memory mode requires cached documents for hybrid retrieval")
-            print("Hybrid retriever not available")
+            logger.warning("In-memory mode requires cached documents for hybrid retrieval")
             return
 
         # For persistent mode: load from vectorstore
         # Get all documents from vectorstore
         if self.vectorstore and self.index_exists:
-            print("Loading documents from existing index for hybrid retrieval...")
+            logger.info("Loading documents from existing index for hybrid retrieval...")
             try:
                 # Get all documents from vectorstore
                 collection = self.vectorstore._collection
@@ -268,12 +270,12 @@ class VectorStoreAbstract():
                 if documents:
                     self.hybrid_retriever = self.create_hybrid_retriever(documents=documents)
                     self._cached_documents = documents
-                    print(f"Hybrid retriever initialized with {len(documents)} documents")
+                    logger.info(f"Hybrid retriever initialized with {len(documents)} documents")
                 else:
-                    print("Warning: No documents found in vectorstore")
+                    logger.warning("No documents found in vectorstore")
             except Exception as e:
-                print(f"Warning: Could not initialize hybrid retriever: {e}")
-                print("Falling back to semantic search only")
+                logger.warning(f"Could not initialize hybrid retriever: {e}")
+                logger.info("Falling back to semantic search only")
 
     def hybrid_search(self,query: str, k: int = 20):
         """Hybrid search using ensemble retriever"""
@@ -284,7 +286,7 @@ class VectorStoreAbstract():
             results = self.hybrid_retriever.invoke(query)
             return results[:k]
         else:
-            print("Warning: Hybrid retriever not available, returning None")
+            logger.warning("Hybrid retriever not available, returning None")
             return None
     
     def _check_index_exists(self) -> bool:

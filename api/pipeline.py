@@ -20,6 +20,10 @@ import openai
 from agents import Agent, Runner
 
 from vectorstore import VectorStoreAbstract
+from config import get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
 
 
 # ============================================================================
@@ -875,8 +879,7 @@ class LiteratureReviewPipeline:
         # Ensure vector store is initialized
         # For in-memory mode, vector_store should already be set from session
         # For persistent mode, we can load from disk if needed
-        print(f"   DEBUG: In retrieve_and_rank_papers, vector_store is: {self.vector_store}")
-        print(f"   DEBUG: vector_store is None: {self.vector_store is None}")
+        logger.debug(f"In retrieve_and_rank_papers, vector_store is initialized: {self.vector_store is not None}")
         if self.vector_store is None:
             # Try to load existing index (only works for persistent mode)
             try:

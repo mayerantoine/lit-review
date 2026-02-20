@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 from enum import Enum
 from dotenv import load_dotenv
@@ -6,6 +7,16 @@ from dotenv import load_dotenv
 # Load .env file from project root (parent directory of api/)
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Create logger
+logger = logging.getLogger(__name__)
 
 
 class VectorStorageMode(str, Enum):
@@ -17,17 +28,51 @@ class VectorStorageMode(str, Enum):
 class Config:
     """Application configuration from environment variables"""
 
+    # Deployment environment: "local" (default) | "azure" | "aws"
+    # Controls deployment-specific defaults and behaviors
+    # - "local": Local development environment
+    # - "azure": Azure App Service deployment (can optionally use Azure Files for persistence)
+    # - "aws": AWS App Runner deployment (in-memory only, no persistent volumes)
+    DEPLOYMENT_ENV: str = os.getenv("DEPLOYMENT_ENV", "local")
+
     # Vector Storage Configuration
+    # Default: "in_memory" for all environments (simpler, stateless, faster)
+    # Optional: "persistent" for future Azure Files integration
     VECTOR_STORAGE_MODE = VectorStorageMode(
-        os.getenv("VECTOR_STORAGE_MODE", "persistent")
+        os.getenv("VECTOR_STORAGE_MODE", "in_memory")
     )
-    VECTOR_PERSIST_DIRECTORY = os.getenv(
+
+    # Environment-aware default persist directory (only used if persistent mode is enabled):
+    #   azure → /data/chromadb (Azure Files mount point)
+    #   aws   → ./corpus-data/chroma_db (unused - in-memory is default)
+    #   local → ./corpus-data/chroma_db
+    # Can be overridden explicitly via VECTOR_PERSIST_DIRECTORY env var
+    _default_persist_dir: str = (
+        "/data/chromadb" if os.getenv("DEPLOYMENT_ENV", "local") == "azure"
+        else "./corpus-data/chroma_db"
+    )
+    VECTOR_PERSIST_DIRECTORY: str = os.getenv(
         "VECTOR_PERSIST_DIRECTORY",
-        "./corpus-data/chroma_db"
+        _default_persist_dir
     )
 
     # OpenAI Configuration
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+    @classmethod
+    def is_local(cls) -> bool:
+        """Check if running in local development environment"""
+        return cls.DEPLOYMENT_ENV == "local"
+
+    @classmethod
+    def is_azure(cls) -> bool:
+        """Check if running in Azure deployment"""
+        return cls.DEPLOYMENT_ENV == "azure"
+
+    @classmethod
+    def is_aws(cls) -> bool:
+        """Check if running in AWS deployment (App Runner)"""
+        return cls.DEPLOYMENT_ENV == "aws"
 
     @classmethod
     def is_persistent_storage(cls) -> bool:
@@ -42,3 +87,9 @@ class Config:
 
 # Global config instance
 config = Config()
+
+
+# Export logger for use in other modules
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger instance for a specific module"""
+    return logging.getLogger(name)
